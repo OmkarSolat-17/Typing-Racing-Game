@@ -135,50 +135,34 @@ jobs:
       # parses, so a failure here is about behaviour — and the log dump (which a trap-on-EXIT
       # would bury after the annotation) is printed inline so it lands in the check output.
       - name: Serve the image and assert it answers, with headers
+        # Every assertion exits through `diag`, which writes an annotation and dumps the
+        # container log: a smoke test that fails with a bare `exit 1` is not a gate, it is a
+        # rumour. The greps read here-strings, never pipes — `curl | grep -q` under
+        # `pipefail` fails on SIGPIPE for a perfectly good response.
         run: |
           set -euo pipefail
-          docker run -d --rm --name keyrush-ci -p 8080:8080 keyrush:ci
+          diag() {
+            echo "::error::$1"
+            echo "--- container log ---"
+            docker logs keyrush-ci 2>&1 | tail -n 15 || true
+            docker stop keyrush-ci >/dev/null 2>&1 || true
+            exit 1
+          }
+          docker run -d --rm --name keyrush-ci -p 8080:8080 keyrush:ci >/dev/null \
+            || diag "the container did not start"
           ok=0
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then ok=1; break; fi
             sleep 1
           done
-          if [ "$ok" != "1" ]; then
-            echo "--- container state ---"; docker ps -a --filter name=keyrush-ci --format '{{.Status}}'
-            echo "--- container logs ---"; docker logs keyrush-ci 2>&1 | tail -40
-            echo "::error::/healthz never answered (see container logs above)"
-            docker stop keyrush-ci >/dev/null
-            exit 1
-          fi
-          echo "/healthz -> $(curl -fsS http://127.0.0.1:8080/healthz)"
-
-          # The response that must carry the policy is the document itself. It used to
-          # declare its own Cache-Control, and nginx drops inherited add_header values in
-          # that case — so the page shipped with no CSP while every config looked right.
-          headers=$(curl -fsSI http://127.0.0.1:8080/ | tr -d '\r')
-          echo "$headers"
-          for h in content-security-policy x-content-type-options x-frame-options; do
-            if ! echo "$headers" | grep -qi "^${h}:"; then
-              echo "::error::GET / is missing the ${h} header"
-              docker stop keyrush-ci >/dev/null
-              exit 1
-            fi
+          [ "$ok" = "1" ] || diag "/healthz never answered on :8080"
+          headers=$(curl -fsSI http://127.0.0.1:8080/ | tr -d '\r') || diag "HEAD / failed"
+          for h in 'content-security-policy:' 'x-content-type-options: nosniff' 'x-frame-options: DENY'; do
+            grep -qi "^${h}" <<<"$headers" || diag "GET / is missing the header '${h}'"
           done
-          echo "$headers" | grep -qi 'x-content-type-options: nosniff'
-          # An SPA host must also serve the app itself, not just the health probe. Note the
-          # `grep -q … <<<"$var"` shape: `curl | grep -q` under `pipefail` is a false failure —
-          # grep exits at the first match, curl then dies on SIGPIPE (141) and the pipeline
-          # reports an error for a page that is perfectly fine.
-          body=$(curl -fsS http://127.0.0.1:8080/)
-          if ! grep -q "KEYRUSH" <<<"$body"; then
-            echo "::error::GET / did not return the app document (no KEYRUSH in the body)"
-            docker stop keyrush-ci >/dev/null
-            exit 1
-          fi
-          if [ "$(wc -c <<<"$body")" -lt 50000 ]; then
-            echo "::error::the served document is only $(wc -c <<<"$body") bytes — the inlined bundle is missing"
-            docker stop keyrush-ci >/dev/null
-            exit 1
-          fi
-          echo "Security headers, the document and the inlined payload all answer."
+          body=$(curl -fsS http://127.0.0.1:8080/) || diag "GET / failed"
+          grep -q 'KEYRUSH' <<<"$body" || diag "GET / did not return the app document"
+          size=$(wc -c <<<"$body")
+          [ "$size" -ge 50000 ] || diag "the served document is only ${size} bytes — the inlined bundle is missing"
+          echo "ok: /healthz answered, / carries the security headers, document is ${size} bytes"
           docker stop keyrush-ci >/dev/null
