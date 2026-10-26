@@ -392,3 +392,34 @@ Worth recording, because all four were in code written as part of this remediati
 - `wpm` is raw (not adjusted); `MIN_VALID_CHARS = 8` is a judgement call, not a law.
 - CI has no visual/browser job: `Play`'s layout is exercised in jsdom only, and `AnimatePresence` screen swaps cannot be driven under fake timers (documented in `tests/screens.test.tsx`) — the App-level tests therefore spend real milliseconds.
 - `nginx.conf`/`Dockerfile` ship security headers but no CSP `nonce`; `'unsafe-inline'` remains because the artifact is a single inlined HTML file.
+
+### 6.5 Post-remediation finding: the deployment path was the bug nobody could see in the source
+
+The audit graded §4.2 on *what the repo contains* and stopped there. Checking what the repository
+actually **publishes** found a defect in the shipped product that no amount of reading `src/` would
+surface:
+
+- `gh api repos/…/pages` → `build_type: "legacy"`, `source: {branch: "master", path: "/"}`. GitHub
+  was running the Jekyll branch pipeline over the repo root, so the live site at
+  `omkarsolat-17.github.io/Typing-Racing-Game/` was serving `index.html` with
+  `<script type="module" src="/src/main.tsx">` — raw, untranspiled TSX. **The production URL was a
+  blank page while every local check was green.** `git ls-tree master` confirms the root contains
+  `src/` and no build output.
+- With `base` left at Vite's default `/`, `href="/favicon.svg"`, `href="/manifest.webmanifest"` and
+  the manifest's `"start_url": "/"`, `"scope": "/"` all resolve to the *domain root* under a project
+  page — icons 404 and the PWA install prompt points at `omkarsolat-17.github.io/`.
+
+Closed by:
+
+| Change | File |
+| --- | --- |
+| `base: "./"` — the artifact is location-independent | `vite.config.ts` |
+| `./favicon.svg`, `./manifest.webmanifest` | `index.html` |
+| `"start_url": "./"`, `"scope": "./"`, `icons[].src: "favicon.svg"` | `public/manifest.webmanifest` |
+| Pages pipeline: `npm run verify` → `upload-pages-artifact` → `deploy-pages`, and an idempotent step that switches `build_type` to `workflow` so branch-mode Jekyll can never publish raw source again | `.github/workflows/deploy-pages.yml` |
+| CI guard: fail if the artifact has a root-absolute URL or any `/src/main` reference | `.github/workflows/ci.yml` (build job) |
+| Deploy + subpath rules documented | `README.md` §Deploy |
+
+Lesson recorded for the next review of an AI-generated repo: **verify what the CI/host config
+actually emits, not just that the config exists.** A workflow file that passes locally and a Pages
+setting that publishes the wrong tree are perfectly compatible states.

@@ -70,6 +70,23 @@ jobs:
             echo "::error::bundle grew past the ${LIMIT} byte gzip budget"
             exit 1
           fi
+      - name: Artifact must be location-independent
+        # This ships under a project-page subpath (/Typing-Racing-Game/) and as a drop-in
+        # file, so a root-absolute URL resolves to the domain root and 404s. A reference to
+        # /src/ in the artifact would mean the raw TSX entry leaked through untranspiled —
+        # which is exactly how the previous Pages setup published an unrunnable page.
+        run: |
+          set -euo pipefail
+          if grep -Eq '(src|href)="/' dist/index.html; then
+            grep -Eno '(src|href)="/[^"]*"' dist/index.html | head -5
+            echo "::error::dist/index.html contains root-absolute URLs; keep base: \"./\" in vite.config.ts"
+            exit 1
+          fi
+          if grep -q '/src/main' dist/index.html; then
+            echo "::error::dist/index.html still references the source entry point"
+            exit 1
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: dist

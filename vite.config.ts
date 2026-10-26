@@ -13,6 +13,12 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * no hashed/immutable sub-resources, so the budget check in CI watches the whole payload.
  */
 export default defineConfig({
+  /**
+   * Relative asset URLs. This ships as a GitHub *project* page under `/Typing-Racing-Game/`
+   * (and as a drop-in file on any other static host), where a root-absolute `/favicon.svg`
+   * resolves to the domain root and 404s. `"./"` makes the artifact location-independent.
+   */
+  base: "./",
   plugins: [react(), tailwindcss(), viteSingleFile()],
   resolve: {
     alias: {

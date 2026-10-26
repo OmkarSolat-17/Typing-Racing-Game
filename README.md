@@ -38,7 +38,9 @@ docker build -t keyrush . && docker run --rm -p 8080:8080 keyrush
 ```
 
 `vite-plugin-singlefile` inlines the JS, CSS and fonts into one `dist/index.html`, which is the
-artifact every host above serves.
+artifact every host above serves. `base: "./"` in `vite.config.ts` keeps every URL in that file
+relative, so the same artifact works from a domain root, a project-page subpath
+(`…/Typing-Racing-Game/`) or someone's `file://` download.
 
 ## How it is put together
 
@@ -125,7 +127,18 @@ finding was closed.
 `.github/workflows/ci.yml` runs four jobs: format+lint+typecheck+coverage, build with a gzip
 budget on the single-file payload (260 KiB — about 95 KiB of that is three inlined latin woff2
 subsets, see the comment in the workflow before you raise it again), `npm audit` on runtime deps,
-and a Docker smoke test that asserts `/healthz` and the security headers actually answer.
+and a Docker smoke test that asserts `/healthz` and the security headers actually answer. The
+build job also fails if the artifact contains a root-absolute URL or a reference to `/src/main.tsx`
+— the second one means untranspiled source leaked into a "built" file.
+
+## Deploy
+
+`.github/workflows/deploy-pages.yml` publishes `master` (or a manual run) to GitHub Pages: it
+`npm run verify`s, uploads `dist/` as the Pages artifact and deploys it. Its first step flips the
+repository's Pages source to **GitHub Actions** if it is still in branch mode — branch mode
+publishes the raw repo root, and for a Vite project that means the live page is an untranspiled
+`<script src="/src/main.tsx">`, i.e. a blank screen. The workflow needs `pages: write` for that;
+if you would rather click, it is Settings → Pages → Source → _GitHub Actions_.
 
 ## Licence
 
