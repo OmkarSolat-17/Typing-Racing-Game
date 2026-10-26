@@ -424,31 +424,39 @@ Lesson recorded for the next review of an AI-generated repo: **verify what the C
 actually emits, not just that the config exists.** A workflow file that passes locally and a Pages
 setting that publishes the wrong tree are perfectly compatible states.
 
-### 6.6 The Docker smoke test caught two more — on the first run that actually executed it
+### 6.6 What the container and the delivery pipeline taught back
 
-`ci.yml` had a Docker job that had never run (it only triggers on `master`/PR). Opening the PR
-turned it red on the first attempt, and both causes were in code written during this remediation:
+Rows 1–5 and the §6.5 finding above share one property: none of them was visible in `src/`, and
+each was the *only* red thing in its CI run. Six round-trips, five distinct causes:
 
-1. **`nginx: [emerg] "pid" directive is duplicate` → the container exited instantly.** The
-   `Dockerfile` ran `nginx -g "pid /var/run/nginx.pid; daemon off;"`, but the official image's
-   own `/etc/nginx/nginx.conf` already sets that exact `pid`; `-g` is a second copy of a
-   main-context directive, so nginx refused to start and `/healthz` never answered. `CMD` is now
-   `nginx -g "daemon off;"` only, and the `chown` of `/var/run` stays because a non-root master
-   still has to write that pid file. A `RUN nginx -t` was added to the image so a config error
-   fails the **build** instead of a 30-second curl loop.
-2. **`add_header` inheritance meant the page had no CSP at all.** `location /` declared its own
-   `Cache-Control`, and nginx *replaces* (does not extend) the inherited `add_header` set as soon
-   as a location declares any — so the document, the one response that must carry
-   `Content-Security-Policy`, shipped without it, while `curl -I /` in the old step still looked
-   plausible because it grepped loosely. Every response header now lives at `server` level; the
-   asset block that genuinely needs to override `Cache-Control` re-lists the two headers that
-   matter there (`nosniff`, `Cross-Origin-Resource-Policy`). The CI assertion checks the headers on
-   `GET /` specifically, plus that the served document contains the app.
-3. Also fixed while in there: no `.dockerignore`, so `COPY . .` shadowed the image's own
-   `npm ci` with the host's `node_modules` (an OS/arch mismatch on any non-Linux dev machine); and
-   the CSP still allowed `fonts.googleapis.com`/`fonts.gstatic.com` after the fonts were
-   self-hosted — a policy permitting an origin the app never calls is dead permission surface.
+| # | Symptom | Cause | Fix |
+| --- | --- | --- | --- |
+| 1 | `docker run` then nothing answers | `CMD nginx -g "pid …; daemon off;"` duplicated the distro config's `pid` → fatal `[emerg] "pid" directive is duplicate` | `-g` carries `daemon off;` only |
+| 2 | Container exits at once, port empty | Unquoted `{6,}` in a regex `location`: nginx ends the parameter at the brace → `unknown directive "6,}\.(js…"` and the config never loads | Quote the pattern; `RUN nginx -t` so this fails the **build** |
+| 3 | `GET /` has no security headers while `nginx.conf` clearly sets them | nginx *replaces* inherited `add_header` in any location that declares one — the `Cache-Control`-only location stripped the CSP from the document | All response headers at `server` level; the asset block re-lists what it must keep; CI asserts the headers on `GET /` |
+| 4 | `exited exit=1` after four `[notice]` lines | The distro main config needs a root master (`user nginx;`, `/var/run/nginx.pid`) | Image owns `nginx.main.conf` (pid in `/tmp`, no `user`, stdout/stderr logs) |
+| 5 | Same exit, different line: `open() "/tmp/nginx.pid" failed (13: Permission denied)` | **`nginx -t` creates the pid file while validating, as root**, leaving a root-owned file the runtime master cannot truncate | `RUN nginx -t && rm -f /tmp/nginx.pid && chown -R appuser /var/cache/nginx` |
 
-Recorded because it is the pattern this whole pass kept hitting: **a check that has never been
-executed is a hypothesis, not a gate.** Both defects above were invisible to `tsc`, `eslint` and
-134 unit tests.
+`Lint · Typecheck · Test` also went red once, on a **test artifact** rather than the app —
+recorded here because these are the traps that make an enforced gate look like a broken product:
+
+- App-level tests slept a fixed `COUNTDOWN.goMs` to wait for `GO`; under coverage instrumentation
+  on a runner that exceeded vitest's 5 s default, so vitest timed the test out and ran
+  `afterEach` cleanup *while it was still awaiting*, and the next `getByRole` in the file reported
+  an empty document ("there are no accessible roles"). The tests now poll the app's own
+  `role="status"` live region, which is correct on a slow machine and is itself an accessibility
+  assertion; `testTimeout`/`hookTimeout` are 20 s with the reason written down.
+- Two `curl | grep -q` assertions were false negatives on their own: `grep -q` exits at the first
+  match, `curl` dies on SIGPIPE (141), and `set -o pipefail` turns a *passing* check into a failed
+  step. The greps read here-strings now.
+- A smoke test must be legible from the checks API: `--rm` deletes an exited container with its
+  log, so every assertion now exits through a `diag()` that puts `State.ExitCode` and the
+  `[emerg]` line into an annotation. Rows 1–5 are only legible because of that; each would
+  otherwise have been a bare `exit code 1` and a 2-minute guess.
+- One commit shipped while `prettier --check` was warning, because the shell chain used `;`
+  instead of the `verify` script. `npm run verify` first, always — the gate exists so the chain
+  cannot be reconstructed by hand, and I reconstructed it by hand.
+
+Final state of the pipeline on this branch: `Build & bundle budget`, `Dependency audit`,
+`Docker smoke test`, `Lint · Typecheck · Test` — **4/4 green on GitHub**, 134 tests, coverage
+floors enforced, gzip artifact inside budget, `npm audit` clean.
