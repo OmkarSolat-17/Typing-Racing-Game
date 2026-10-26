@@ -142,11 +142,16 @@ build job also fails if the artifact contains a root-absolute URL or a reference
 ## Deploy
 
 `.github/workflows/deploy-pages.yml` publishes `master` (or a manual run) to GitHub Pages: it
-`npm run verify`s, uploads `dist/` as the Pages artifact and deploys it. Its first step flips the
-repository's Pages source to **GitHub Actions** if it is still in branch mode — branch mode
-publishes the raw repo root, and for a Vite project that means the live page is an untranspiled
-`<script src="/src/main.tsx">`, i.e. a blank screen. The workflow needs `pages: write` for that;
-if you would rather click, it is Settings → Pages → Source → _GitHub Actions_.
+`npm run verify`s, checks where Pages is sourcing from, uploads `dist/` as the Pages artifact and
+deploys it.
+
+**One-time setup, in the UI:** Settings → Pages → Build and deployment → Source → **GitHub
+Actions**. Without it the workflow refuses to deploy and says exactly that in its failure
+annotation. Branch mode publishes the raw repo root through Jekyll, and for a Vite project the
+live page is then an untranspiled `<script src="/src/main.tsx">` — a blank screen that reports
+itself as "deployed". The workflow deliberately only _checks_ this: a token cannot change a
+site's hosting settings (`403 Resource not accessible by integration`), and a deploy silently
+mutating where it publishes would be wrong even if it could.
 
 ## Licence
 
