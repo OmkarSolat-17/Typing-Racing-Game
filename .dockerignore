@@ -1,0 +1,18 @@
+# The build stage runs its own `npm ci` from the lockfile. Copying the host's
+# node_modules would shadow it with binaries built for the wrong OS/arch (a macOS
+# checkout produces a Linux-unusable tree) and multiply the build context by ~400 MB.
+node_modules
+dist
+coverage
+
+# Not inputs to the image.
+.git
+.github
+AUDIT-REPORT.md
+README.md
+LICENSE
+Dockerfile
+.dockerignore
+.env
+.env.*
+*.local

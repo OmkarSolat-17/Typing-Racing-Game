@@ -127,7 +127,9 @@ finding was closed.
 `.github/workflows/ci.yml` runs four jobs: format+lint+typecheck+coverage, build with a gzip
 budget on the single-file payload (260 KiB — about 95 KiB of that is three inlined latin woff2
 subsets, see the comment in the workflow before you raise it again), `npm audit` on runtime deps,
-and a Docker smoke test that asserts `/healthz` and the security headers actually answer. The
+and a Docker smoke test that boots the image and asserts `/healthz` answers, that `GET /`
+itself carries the CSP/nosniff/frame-deny headers (a header set the document can silently lose,
+see the note in `nginx.conf`), and that the built document really contains the app. The
 build job also fails if the artifact contains a root-absolute URL or a reference to `/src/main.tsx`
 — the second one means untranspiled source leaked into a "built" file.
 

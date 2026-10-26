@@ -423,3 +423,32 @@ Closed by:
 Lesson recorded for the next review of an AI-generated repo: **verify what the CI/host config
 actually emits, not just that the config exists.** A workflow file that passes locally and a Pages
 setting that publishes the wrong tree are perfectly compatible states.
+
+### 6.6 The Docker smoke test caught two more — on the first run that actually executed it
+
+`ci.yml` had a Docker job that had never run (it only triggers on `master`/PR). Opening the PR
+turned it red on the first attempt, and both causes were in code written during this remediation:
+
+1. **`nginx: [emerg] "pid" directive is duplicate` → the container exited instantly.** The
+   `Dockerfile` ran `nginx -g "pid /var/run/nginx.pid; daemon off;"`, but the official image's
+   own `/etc/nginx/nginx.conf` already sets that exact `pid`; `-g` is a second copy of a
+   main-context directive, so nginx refused to start and `/healthz` never answered. `CMD` is now
+   `nginx -g "daemon off;"` only, and the `chown` of `/var/run` stays because a non-root master
+   still has to write that pid file. A `RUN nginx -t` was added to the image so a config error
+   fails the **build** instead of a 30-second curl loop.
+2. **`add_header` inheritance meant the page had no CSP at all.** `location /` declared its own
+   `Cache-Control`, and nginx *replaces* (does not extend) the inherited `add_header` set as soon
+   as a location declares any — so the document, the one response that must carry
+   `Content-Security-Policy`, shipped without it, while `curl -I /` in the old step still looked
+   plausible because it grepped loosely. Every response header now lives at `server` level; the
+   asset block that genuinely needs to override `Cache-Control` re-lists the two headers that
+   matter there (`nosniff`, `Cross-Origin-Resource-Policy`). The CI assertion checks the headers on
+   `GET /` specifically, plus that the served document contains the app.
+3. Also fixed while in there: no `.dockerignore`, so `COPY . .` shadowed the image's own
+   `npm ci` with the host's `node_modules` (an OS/arch mismatch on any non-Linux dev machine); and
+   the CSP still allowed `fonts.googleapis.com`/`fonts.gstatic.com` after the fonts were
+   self-hosted — a policy permitting an origin the app never calls is dead permission surface.
+
+Recorded because it is the pattern this whole pass kept hitting: **a check that has never been
+executed is a hypothesis, not a gate.** Both defects above were invisible to `tsc`, `eslint` and
+134 unit tests.
