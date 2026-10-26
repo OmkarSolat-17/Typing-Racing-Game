@@ -1,5 +1,20 @@
+/**
+ * KEYRUSH — shared domain types.
+ *
+ * This module is types-only on purpose: every tunable table lives in `config.ts`,
+ * every rule lives in `rules.ts`, and every derived number lives in `metrics.ts`.
+ */
+
 export type Mode = "sprint" | "time" | "overdrive" | "zen";
 export type Difficulty = "easy" | "medium" | "hard" | "code";
+
+/** Explicit lifecycle of a race. The only legal moves are documented in `rules.ts`. */
+export type Status = "idle" | "countdown" | "playing" | "paused" | "finished";
+
+/** Why a run ended. `finished` is derived from this — never set independently. */
+export type EndReason = "track" | "clock" | "crash" | "abandon";
+
+export type Finger = "pinkyL" | "ringL" | "midL" | "idxL" | "idxR" | "midR" | "ringR" | "pinkyR" | "thumb" | "unknown";
 
 export interface ModeDef {
   id: Mode;
@@ -7,77 +22,45 @@ export interface ModeDef {
   tag: string;
   blurb: string;
   accent: string;
+  /** Baseline track size in words, before the difficulty's `trackFactor`. */
   words: number;
-  seconds?: number;
+  /** Seconds on the clock. `null` = untimed. */
+  seconds: number | null;
   rivals: boolean;
-  energy?: boolean;
+  /** Boost-tank survival rule. */
+  energy: boolean;
+  /** Fraction of the baseline track that counts as one "lap" for the progress bar. */
+  lapFraction: number;
 }
 
-export const MODES: ModeDef[] = [
-  {
-    id: "sprint",
-    name: "SPRINT 25",
-    tag: "PURE SPEED",
-    blurb: "25 words. Two rivals. No mercy — post your fastest lap ever.",
-    accent: "#ffb020",
-    words: 25,
-    rivals: true,
-  },
-  {
-    id: "time",
-    name: "TIME ATTACK",
-    tag: "60 SECONDS",
-    blurb: "One minute on the clock. Bank as much distance and score as you can.",
-    accent: "#4cc9ff",
-    words: 45,
-    seconds: 60,
-    rivals: true,
-  },
-  {
-    id: "overdrive",
-    name: "OVERDRIVE",
-    tag: "SURVIVAL",
-    blurb: "Boost tanks drain fast. Clean typing refuels them, typos torch them.",
-    accent: "#ff5a7a",
-    words: 30,
-    rivals: true,
-    energy: true,
-  },
-  {
-    id: "zen",
-    name: "ZEN LANE",
-    tag: "PRACTICE",
-    blurb: "No timer, no rivals. Finger guide on, long stretch of steady typing.",
-    accent: "#35e0a1",
-    words: 50,
-    rivals: false,
-  },
-];
-
-export const DIFFICULTIES: {
+export interface DifficultyDef {
   id: Difficulty;
   name: string;
   hint: string;
+  /** Rival speed band, WPM. */
   rivalWpm: [number, number];
-}[] = [
-  { id: "easy", name: "ROOKIE", hint: "short common words", rivalWpm: [24, 34] },
-  { id: "medium", name: "RACER", hint: "everyday vocabulary", rivalWpm: [38, 50] },
-  { id: "hard", name: "VETERAN", hint: "long + tricky words", rivalWpm: [52, 68] },
-  { id: "code", name: "SYNTAX", hint: "code & punctuation", rivalWpm: [40, 56] },
-];
+  /** Longer words → fewer of them, so every track is a comparable *duration*. */
+  trackFactor: number;
+  /** Boost-tank drain per second while playing. */
+  drain: number;
+}
 
 export interface RivalState {
   name: string;
   color: string;
-  wpm: number;
+  /** Nominal speed for the whole race. */
   base: number;
+  /** Instantaneous, sinusoidally modulated speed. */
+  wpm: number;
   drift: number;
-  dist: number; // characters typed
-  progress: number; // 0..1
+  phase: number;
+  dist: number;
+  progress: number;
   finished: boolean;
   finishAt: number;
 }
 
+/** One recorded run. Persisted (see `storage.ts`) — so it is validated on the way back in. */
 export interface RunRecord {
   id: string;
   mode: Mode;
@@ -88,13 +71,22 @@ export interface RunRecord {
   score: number;
   correctChars: number;
   incorrectChars: number;
+  /** Words typed to completion (skips excluded). */
   words: number;
+  /** Words passed without typing them. */
+  skips: number;
   perfectWords: number;
   maxCombo: number;
+  /** 1-based; 0 when the mode has no rivals or the run did not place. */
   place: number;
+  /** Field size is 3 (you + 2 rivals). */
+  field: number;
   durationMs: number;
+  endReason: EndReason;
+  /** A completed race. */
   finished: boolean;
-  newBadge: string | null;
+  /** Eligible for `best`, badges and the leaderboard: real input, no skips. */
+  valid: boolean;
   date: number;
   series: number[];
   keyMisses: Record<string, number>;
@@ -109,6 +101,9 @@ export interface Settings {
 }
 
 export interface Totals {
+  /** Every run ever recorded, including abandoned ones. */
+  races: number;
+  finishedRaces: number;
   keystrokes: number;
   correctChars: number;
   incorrectChars: number;
@@ -122,10 +117,16 @@ export interface Totals {
   firstPlaces: number;
 }
 
+export interface ModeBest {
+  wpm: number;
+  score: number;
+  accuracy: number;
+}
+
 export interface Stats {
   runs: RunRecord[];
   totals: Totals;
   keyMisses: Record<string, number>;
-  best: Record<Mode, { wpm: number; score: number; accuracy: number } | null>;
+  best: Record<Mode, ModeBest | null>;
   badges: string[];
 }

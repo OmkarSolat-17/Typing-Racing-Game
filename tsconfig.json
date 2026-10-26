@@ -4,16 +4,16 @@
     "useDefineForClassFields": true,
     "lib": ["ES2020", "DOM", "DOM.Iterable"],
     "module": "ESNext",
-    "skipLibCheck": true,
-    "types": ["node"],
-
-    /* Bundler mode */
     "moduleResolution": "bundler",
+    "types": ["node"],
+    "jsx": "react-jsx",
+
+    /* Bundler mode — the compiler never emits, `vite build` does. */
     "allowImportingTsExtensions": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "moduleDetection": "force",
     "noEmit": true,
-    "jsx": "react-jsx",
 
     /* Path mapping */
     "baseUrl": ".",
@@ -21,11 +21,26 @@
       "@/*": ["src/*"]
     },
 
-    /* Linting */
+    /*
+     * Strictness. `noUncheckedIndexedAccess` and `exactOptionalPropertyTypes` are ON, and
+     * every `Record`/array read in the app is written to match: they are the two flags that
+     * would have caught the original code's `find(...)!`, `undefined66` colour strings and
+     * half-populated option objects. A project that persists untrusted JSON and reads
+     * `ev.key` straight off the keyboard does not get to skip them.
+     */
     "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "noFallthroughCasesInSwitch": true
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true
   },
-  "include": ["src", "vite.config.ts"]
+  "include": ["src", "tests", "vite.config.ts", "vitest.config.ts"],
+  "exclude": ["node_modules", "dist"]
 }

@@ -1,0 +1,13 @@
+{
+  "name": "KEYRUSH — Arcade Typing Racer",
+  "short_name": "KEYRUSH",
+  "description": "Race rivals, build combos and master touch typing. Offline-capable arcade typing trainer.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#080b18",
+  "theme_color": "#0a0d1c",
+  "categories": ["games", "education", "productivity"],
+  "icons": [{ "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

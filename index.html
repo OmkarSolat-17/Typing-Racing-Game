@@ -2,19 +2,46 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <meta name="theme-color" content="#0a0d1c" />
+    <meta name="color-scheme" content="dark" />
     <meta name="description" content="KEYRUSH — arcade typing racer. Race rivals, build combos, master touch typing." />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
     <title>KEYRUSH — Arcade Typing Racer</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Bungee&family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&display=swap"
-      rel="stylesheet"
-    />
+
+    <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./favicon.svg" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+
+    <!--
+      Fonts are self-hosted (@fontsource packages, imported from src/index.css) rather than
+      pulled from fonts.googleapis.com: no render-blocking third-party request, no font-CDN
+      dependency for glyph metrics, and the CSP can stay 'self'-only. `font-display: swap`
+      is set by the @fontsource stylesheets.
+    -->
   </head>
   <body>
     <div id="root"></div>
+    <noscript>
+      <div
+        style="
+          padding: 2rem;
+          font:
+            500 15px/1.6 ui-sans-serif,
+            system-ui;
+          color: #f3efe4;
+        "
+      >
+        <h1 style="font-size: 1.4rem; margin: 0 0 0.5rem">KEYRUSH needs JavaScript</h1>
+        <p style="margin: 0">
+          The race loop, scoring and keyboard capture all run in the browser — nothing is sent anywhere. Enable
+          JavaScript to play.
+        </p>
+      </div>
+    </noscript>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

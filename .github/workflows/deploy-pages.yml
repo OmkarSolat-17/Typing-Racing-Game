@@ -1,0 +1,69 @@
+name: Deploy (GitHub Pages)
+
+# Publishing is deliberately separate from CI: `ci.yml` decides *whether* a commit is good
+# enough, this job decides where it goes. Only `master` (or a manual run) ships.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy halfway through; queue it instead.
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # `verify` is format:check → lint → typecheck → tests → build, so a deploy cannot
+      # publish something the local workflow would have rejected.
+      - run: npm ci
+      - run: npm run verify
+
+      # The artifact is a single self-contained `dist/index.html` (vite-plugin-singlefile)
+      # plus the files in `public/`; there is no asset tree to keep in sync.
+      - name: Switch Pages to "GitHub Actions" if it is still in branch mode
+        # Branch mode publishes the raw repo root, which for a Vite project means serving
+        # untranspiled TSX — an HTML page the browser cannot run. Idempotent, and safe to
+        # leave in: it only writes when the current build_type is not already `workflow`.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          current=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type' 2>/dev/null || echo "none")
+          echo "Pages build_type: ${current}"
+          if [ "${current}" != "workflow" ]; then
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" -f build_type=workflow >/dev/null
+            echo "Pages now builds from GitHub Actions."
+          fi
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.outputs.outputs.page_url }}
+    steps:
+      - id: outputs
+        uses: actions/deploy-pages@v4

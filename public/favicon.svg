@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="KEYRUSH">
+  <rect width="64" height="64" rx="14" fill="#080b18" />
+  <path d="M8 44 L56 44" stroke="#2c3866" stroke-width="4" stroke-linecap="round" />
+  <path d="M12 38 L20 26 Q23 22 28 22 L40 22 Q46 22 50 27 L54 34 Q56 37 52 37 L14 37 Q11 37 12 38 Z" fill="#ffb020" />
+  <circle cx="24" cy="39" r="5" fill="#080b18" stroke="#ffb020" stroke-width="2" />
+  <circle cx="44" cy="39" r="5" fill="#080b18" stroke="#ffb020" stroke-width="2" />
+  <rect x="26" y="26" width="10" height="6" rx="2" fill="#080b18" opacity=".65" />
+</svg>

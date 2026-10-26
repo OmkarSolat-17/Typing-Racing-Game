@@ -1,0 +1,170 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint · Typecheck · Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install (frozen lockfile — a missing entry is a failure, not an install)
+        run: npm ci
+
+      - name: Formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests + coverage floors
+        run: npm run test:coverage
+
+  build:
+    name: Build & bundle budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build:fast
+      - name: Enforce the payload budget (gzip bytes of dist/index.html)
+        # This build inlines *everything* (index.html is the whole app: JS, CSS and three
+        # latin-subset woff2 faces, ~95 kB of the total, base64'd by vite-plugin-singlefile).
+        # The budget therefore covers one self-contained document, not a chunk graph. If this
+        # fails, the cheapest wins are: drop a weight from src/index.css's @font-face rules,
+        # or serve the fonts as separate files instead of inlining them. Do not "fix" it by
+        # re-adding a Google Fonts request — no third-party render-blocking origin is a
+        # deliberate property of this app.
+        run: |
+          set -euo pipefail
+          SIZE=$(gzip -9 -c dist/index.html | wc -c)
+          LIMIT=$((260 * 1024))
+          echo "gzip payload: ${SIZE} bytes (budget ${LIMIT})"
+          if [ "${SIZE}" -gt "${LIMIT}" ]; then
+            echo "::error::bundle grew past the ${LIMIT} byte gzip budget"
+            exit 1
+          fi
+      - name: Artifact must be location-independent
+        # This ships under a project-page subpath (/Typing-Racing-Game/) and as a drop-in
+        # file, so a root-absolute URL resolves to the domain root and 404s. A reference to
+        # /src/ in the artifact would mean the raw TSX entry leaked through untranspiled —
+        # which is exactly how the previous Pages setup published an unrunnable page.
+        run: |
+          set -euo pipefail
+          if grep -Eq '(src|href)="/' dist/index.html; then
+            grep -Eno '(src|href)="/[^"]*"' dist/index.html | head -5
+            echo "::error::dist/index.html contains root-absolute URLs; keep base: \"./\" in vite.config.ts"
+            exit 1
+          fi
+          if grep -q '/src/main' dist/index.html; then
+            echo "::error::dist/index.html still references the source entry point"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Runtime deps only: dev-server advisories are handled by the pin bump, not by a red build.
+      - run: npm run audit:ci
+
+  docker:
+    name: Docker smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image builds the app itself (multi-stage, `nginx -t` included), so this job
+      # exercises exactly what ships rather than a CI-only approximation of it.
+      - name: Build the image
+        # The build log is echoed into an annotation as well as the job transcript: a
+        # red image build is otherwise only diagnosable by reading 400 lines of Dockerfile
+        # layers, and a one-line annotation is what shows up on the commit checks.
+        run: |
+          set -euo pipefail
+          if ! docker build -t keyrush:ci . >/tmp/docker-build.log 2>&1; then
+            tail -n 30 /tmp/docker-build.log
+            first=$(grep -m1 -E '^ERROR|error:|\[emerg\]|failed to' /tmp/docker-build.log | tr -d '\r' | cut -c1-200 || true)
+            echo "::error::docker build failed: ${first:-see job log}"
+            exit 1
+          fi
+          tail -n 3 /tmp/docker-build.log
+
+      # One container, one session: `nginx -t` at build time already proves the config
+      # parses, so a failure here is about behaviour — and the log dump (which a trap-on-EXIT
+      # would bury after the annotation) is printed inline so it lands in the check output.
+      - name: Serve the image and assert it answers, with headers
+        # Diagnostics are the point of this step. `--rm` deletes an exited container along
+        # with its log, so a start failure would be unobservable; the state and the last
+        # lines of stderr are pulled into the annotation instead, where a red check can
+        # actually be read. Greps use here-strings: `curl | grep -q` + `pipefail` reports a
+        # false failure because grep exits on its first match and curl dies on SIGPIPE.
+        run: |
+          set -euo pipefail
+          diag() {
+            state=$(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' keyrush-ci 2>/dev/null || echo "no container")
+            log=$( { docker logs keyrush-ci 2>&1 | grep -aiE "emerg|crit|denied|unknown directive|invalid|address already" | tail -n 3; } | tr '\n\r' '  ' | cut -c1-300)
+            [ -n "$log" ] || log=$(docker logs keyrush-ci 2>&1 | tail -n 3 | tr '\n\r' '  ' | cut -c1-300)
+            echo "::error::$1 | ${state} | nginx: ${log}"
+            docker rm -f keyrush-ci >/dev/null 2>&1 || true
+            exit 1
+          }
+          docker run -d --name keyrush-ci -p 8080:8080 keyrush:ci >/dev/null \
+            || diag "the container did not start"
+          ok=0
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null 2>&1; then ok=1; break; fi
+            sleep 1
+          done
+          [ "$ok" = "1" ] || diag "/healthz never answered on :8080"
+          headers=$(curl -fsSI http://127.0.0.1:8080/ | tr -d '\r') || diag "HEAD / failed"
+          for h in 'content-security-policy:' 'x-content-type-options: nosniff' 'x-frame-options: DENY'; do
+            grep -qi "^${h}" <<<"$headers" || diag "GET / is missing the header '${h}'"
+          done
+          body=$(curl -fsS http://127.0.0.1:8080/) || diag "GET / failed"
+          grep -q 'KEYRUSH' <<<"$body" || diag "GET / did not return the app document"
+          size=${#body}
+          [ "$size" -ge 50000 ] || diag "the served document is only ${size} bytes — the inlined bundle is missing"
+          echo "ok: /healthz answered, / carries the security headers, document is ${size} bytes"
+          docker rm -f keyrush-ci >/dev/null

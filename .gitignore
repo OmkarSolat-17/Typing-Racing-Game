@@ -1,0 +1,36 @@
+# ---- dependencies / build output ----
+node_modules/
+dist/
+dist-ssr/
+build/
+coverage/
+*.tsbuildinfo
+
+# ---- local env & secrets (never commit; .env.example is the template) ----
+.env
+.env.*
+!.env.example
+
+# ---- tooling caches ----
+.vite/
+.cache/
+.eslintcache
+.prettiercache
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- editor / os noise ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+
+# ---- agent / scratch artifacts ----
+tmp/
+.tmp/
+.playwright-cli/
