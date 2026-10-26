@@ -115,6 +115,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The image builds the app itself (multi-stage, `nginx -t` included), so this job
+      # exercises exactly what ships rather than a CI-only approximation of it.
+      - name: Build the image
+        run: docker build -t keyrush:ci .
+
       # One container, one session: `nginx -t` at build time already proves the config
       # parses, so a failure here is about behaviour — and the log dump (which a trap-on-EXIT
       # would bury after the annotation) is printed inline so it lands in the check output.
