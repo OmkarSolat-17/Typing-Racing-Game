@@ -135,20 +135,21 @@ jobs:
       # parses, so a failure here is about behaviour — and the log dump (which a trap-on-EXIT
       # would bury after the annotation) is printed inline so it lands in the check output.
       - name: Serve the image and assert it answers, with headers
-        # Every assertion exits through `diag`, which writes an annotation and dumps the
-        # container log: a smoke test that fails with a bare `exit 1` is not a gate, it is a
-        # rumour. The greps read here-strings, never pipes — `curl | grep -q` under
-        # `pipefail` fails on SIGPIPE for a perfectly good response.
+        # Diagnostics are the point of this step. `--rm` deletes an exited container along
+        # with its log, so a start failure would be unobservable; the state and the last
+        # lines of stderr are pulled into the annotation instead, where a red check can
+        # actually be read. Greps use here-strings: `curl | grep -q` + `pipefail` reports a
+        # false failure because grep exits on its first match and curl dies on SIGPIPE.
         run: |
           set -euo pipefail
           diag() {
-            echo "::error::$1"
-            echo "--- container log ---"
-            docker logs keyrush-ci 2>&1 | tail -n 15 || true
-            docker stop keyrush-ci >/dev/null 2>&1 || true
+            state=$(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' keyrush-ci 2>/dev/null || echo "no container")
+            log=$(docker logs keyrush-ci 2>&1 | tail -n 6 | tr '\n\r' '  ' | cut -c1-260 || true)
+            echo "::error::$1 | ${state} | nginx: ${log}"
+            docker rm -f keyrush-ci >/dev/null 2>&1 || true
             exit 1
           }
-          docker run -d --rm --name keyrush-ci -p 8080:8080 keyrush:ci >/dev/null \
+          docker run -d --name keyrush-ci -p 8080:8080 keyrush:ci >/dev/null \
             || diag "the container did not start"
           ok=0
           for _ in $(seq 1 30); do
@@ -162,7 +163,7 @@ jobs:
           done
           body=$(curl -fsS http://127.0.0.1:8080/) || diag "GET / failed"
           grep -q 'KEYRUSH' <<<"$body" || diag "GET / did not return the app document"
-          size=${#body} # byte length without a subprocess, so no `wc` padding to trip over
+          size=${#body}
           [ "$size" -ge 50000 ] || diag "the served document is only ${size} bytes — the inlined bundle is missing"
           echo "ok: /healthz answered, / carries the security headers, document is ${size} bytes"
-          docker stop keyrush-ci >/dev/null
+          docker rm -f keyrush-ci >/dev/null
