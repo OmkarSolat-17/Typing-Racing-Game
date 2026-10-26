@@ -7,6 +7,13 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   esbuild: { jsx: "automatic" },
   test: {
+    // The App-level tests cannot fake their way past `AnimatePresence`: the screen swap and
+    // the engine's countdown run on real timers, so a single test legitimately spends ~2.5s
+    // waiting. Vitest's 5s default is not enough headroom once v8 coverage instrumentation
+    // and a 4-core runner are factored in, and a timeout mid-test unmounts the tree under the
+    // following assertion — a red run that looks like a broken component.
+    testTimeout: 20_000,
+    hookTimeout: 20_000,
     environment: "jsdom",
     globals: false,
     include: ["tests/**/*.test.{ts,tsx}"],

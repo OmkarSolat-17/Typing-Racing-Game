@@ -4,7 +4,7 @@
  * after teardown, a keystroke that never reached the rules. Those are invisible to unit tests
  * of either side, so the app is mounted for real here.
  */
-import { cleanup, fireEvent, render, screen, act, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, act, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "../src/App";
 import Results from "../src/screens/Results";
@@ -12,7 +12,7 @@ import StatsScreen from "../src/screens/Stats";
 import Home from "../src/screens/Home";
 import { emptyStats, recordRun } from "../src/game/career";
 import type { RunRecord, Settings } from "../src/game/types";
-import { DEFAULT_SETTINGS } from "../src/game/config";
+import { DEFAULT_SETTINGS, HANDOFF } from "../src/game/config";
 
 /** A canvas context that accepts and counts any call, so FxCanvas is exercised, not skipped. */
 function installCanvas(): void {
@@ -107,6 +107,17 @@ describe("<App /> boot path", () => {
     });
   };
 
+  /**
+   * "The race is live" is polled from the app's own `role="status"` live region rather than
+   * guessed from a sleep: a slow runner delays `GO`, and a fixed wait would then type into a
+   * countdown and fail as if input handling were broken.
+   */
+  const waitGo = () =>
+    waitFor(() => expect(screen.getByRole("status").textContent).toBe("Go"), {
+      timeout: 9000,
+      interval: 40,
+    });
+
   it("mounts on the home screen with no storage and no console errors", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});
     const { container } = render(<App />);
@@ -127,7 +138,7 @@ describe("<App /> boot path", () => {
     const early = document.querySelector("[data-caret='1']");
     expect(early?.parentElement?.firstElementChild).toBe(early);
 
-    await sleep(1700); // 3 · 2 · 1 · GO
+    await waitGo(); // 3 · 2 · 1 · GO
     const caret = document.querySelector("[data-caret='1']");
     expect(caret).not.toBeNull();
     const word = (caret?.parentElement?.textContent ?? "").replace(/\u00a0/g, " ").trim();
@@ -150,7 +161,7 @@ describe("<App /> boot path", () => {
     expect(saved?.runs[0]?.finished).toBe(false);
     expect(saved?.runs[0]?.valid).toBe(false);
     // …and no deferred results screen arrives for a race that was already left.
-    await sleep(2000);
+    await sleep(HANDOFF.resultDelayMs + 300);
     expect(screen.queryByText(/TRACK CLEARED|VICTORY|RACE ABANDONED/) === null).toBe(true);
     expect(screen.getByRole("button", { name: /start engine/i })).toBeDefined();
   });
@@ -159,7 +170,7 @@ describe("<App /> boot path", () => {
     render(<App />);
     fireEvent.click(screen.getByRole("button", { name: /start engine/i }));
     await sleep(300);
-    await sleep(1700);
+    await waitGo();
     await press("s");
     const partial = document.querySelector("[data-caret='1']")?.parentElement?.textContent ?? "";
     expect(partial.length).toBeGreaterThan(0);
