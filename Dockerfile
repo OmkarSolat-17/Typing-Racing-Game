@@ -28,7 +28,13 @@ RUN adduser -D -H -u 10024 appuser \
 COPY nginx.main.conf /etc/nginx/nginx.conf
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 # Fail the *build*, not the deploy: a malformed server block is otherwise a dead container.
-RUN nginx -t
+# The `rm` is not decoration: `nginx -t` creates the pid file while validating, as root, and a
+# leftover root-owned /tmp/nginx.pid makes the *runtime* master die with
+# `open() "/tmp/nginx.pid" failed (13: Permission denied)` — a config check that quietly
+# poisons the image it is checking. The second chown is for the temp/body paths that
+# validation creates as root inside the (already chowned) cache tree.
+RUN nginx -t && rm -f /tmp/nginx.pid \
+    && chown -R appuser:appuser /var/cache/nginx
 
 COPY --chown=appuser:appuser --from=build /app/dist /usr/share/nginx/html
 USER appuser

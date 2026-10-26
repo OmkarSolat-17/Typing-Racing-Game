@@ -37,6 +37,12 @@ Deployment is a static host or the included image:
 docker build -t keyrush . && docker run --rm -p 8080:8080 keyrush
 ```
 
+The image runs nginx as an arbitrary uid, so it ships its own main-context config
+(`nginx.main.conf`: pid under `/tmp`, no `user` directive, access/error logs on stdout/stderr)
+and keeps the site block in `nginx.conf` → `/etc/nginx/conf.d/default.conf`. `RUN nginx -t`
+inside the image means a config that cannot load fails the *build* rather than presenting an
+empty port 30 seconds later.
+
 `vite-plugin-singlefile` inlines the JS, CSS and fonts into one `dist/index.html`, which is the
 artifact every host above serves. `base: "./"` in `vite.config.ts` keeps every URL in that file
 relative, so the same artifact works from a domain root, a project-page subpath
