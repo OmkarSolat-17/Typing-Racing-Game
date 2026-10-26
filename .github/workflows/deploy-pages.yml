@@ -35,23 +35,29 @@ jobs:
       - run: npm ci
       - run: npm run verify
 
-      # The artifact is a single self-contained `dist/index.html` (vite-plugin-singlefile)
-      # plus the files in `public/`; there is no asset tree to keep in sync.
-      - name: Switch Pages to "GitHub Actions" if it is still in branch mode
-        # Branch mode publishes the raw repo root, which for a Vite project means serving
-        # untranspiled TSX — an HTML page the browser cannot run. Idempotent, and safe to
-        # leave in: it only writes when the current build_type is not already `workflow`.
+      # Deliberately a check, not a fix. Changing where a site publishes from is a hosting
+      # decision: the workflow token gets 403 "Resource not accessible by integration" on that
+      # endpoint (as does any non-owner token), and a deploy silently mutating repo settings
+      # would be wrong even if it could. So fail with the exact click instead — the failure mode
+      # being guarded is real: branch mode over the repo root publishes index.html pointing at
+      # /src/main.tsx, i.e. an unrunnable page that looks "deployed".
+      - name: Pages must be sourced from GitHub Actions
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          current=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type' 2>/dev/null || echo "none")
-          echo "Pages build_type: ${current}"
-          if [ "${current}" != "workflow" ]; then
-            gh api -X PUT "repos/${GITHUB_REPOSITORY}/pages" -f build_type=workflow >/dev/null
-            echo "Pages now builds from GitHub Actions."
+          if ! source_mode=$(gh api "repos/${GITHUB_REPOSITORY}/pages" --jq '.build_type'); then
+            echo "::error::could not read the Pages configuration for ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+          echo "Pages build_type: ${source_mode}"
+          if [ "${source_mode}" != "workflow" ]; then
+            echo "::error::Pages is in '${source_mode}' mode, which publishes the repo root through Jekyll — for a Vite app that is untranspiled source, not a site. Fix: Settings → Pages → Build and deployment → Source: 'GitHub Actions', then re-run this workflow. The artifact itself is fine: dist/index.html, $(du -h dist/index.html | cut -f1)."
+            exit 1
           fi
 
+      # The artifact is a single self-contained `dist/index.html` (vite-plugin-singlefile)
+      # plus the files in `public/`; there is no asset tree to keep in sync.
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
