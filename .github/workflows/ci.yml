@@ -162,7 +162,7 @@ jobs:
           done
           body=$(curl -fsS http://127.0.0.1:8080/) || diag "GET / failed"
           grep -q 'KEYRUSH' <<<"$body" || diag "GET / did not return the app document"
-          size=$(wc -c <<<"$body")
+          size=${#body} # byte length without a subprocess, so no `wc` padding to trip over
           [ "$size" -ge 50000 ] || diag "the served document is only ${size} bytes — the inlined bundle is missing"
           echo "ok: /healthz answered, / carries the security headers, document is ${size} bytes"
           docker stop keyrush-ci >/dev/null
