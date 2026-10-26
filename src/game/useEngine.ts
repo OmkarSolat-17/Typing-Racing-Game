@@ -1,477 +1,261 @@
+/**
+ * React adapter around the pure rules in `rules.ts`.
+ *
+ * It owns exactly three things:
+ *  • one mutable `RunState` per race, held in a ref and sampled for rendering;
+ *  • the frame loop and the countdown timers — every timer tracked, every timer cancelled;
+ *  • the pause discipline: hiding the tab pauses the race, so the wall clock can never
+ *    eat a minute you spent in another window.
+ *
+ * No scoring, rivals, records or persistence happen here. That is `rules.ts` and
+ * `career.ts`, both unit-tested without a DOM.
+ */
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Difficulty, Mode, RivalState, RunRecord } from "./types";
-import { DIFFICULTIES, MODES } from "./types";
-import { buildTrack, RIVAL_NAMES, TOTAL_CHARS } from "./words";
+import { COUNTDOWN, PUBLISH_INTERVAL_MS } from "./config";
+import { now, stamp } from "./clock";
+import {
+  advance,
+  backspace as rulesBackspace,
+  beginPlaying,
+  createRun,
+  keyDown,
+  pauseRun,
+  prepareRun,
+  resumeRun,
+  setCountdown,
+  skipWord,
+  snapshot,
+  toRecord,
+  type GameEvent,
+  type RunState,
+  type Snapshot,
+} from "./rules";
+import type { Difficulty, EndReason, Mode, RunRecord } from "./types";
 
-export type Status = "idle" | "countdown" | "playing" | "paused" | "finished";
+export type { GameEvent, RunState, Snapshot } from "./rules";
+export type { Status } from "./types";
 
-export type GameEvent =
-  | { type: "countdown"; n: number }
-  | { type: "go" }
-  | { type: "key"; char: string; ok: boolean; combo: number }
-  | { type: "word"; word: string; perfect: boolean; mult: number; idx: number }
-  | { type: "skip"; word: string }
-  | { type: "error"; char: string }
-  | { type: "overtake"; up: boolean; rival: string }
-  | { type: "warn"; energy: number }
-  | { type: "finish"; result: RunRecord };
-
-export interface Snap {
-  status: Status;
-  words: string[];
-  idx: number;
-  typed: string;
-  score: number;
-  combo: number;
-  mult: number;
-  wpm: number;
-  rawWpm: number;
-  accuracy: number;
-  correctChars: number;
-  incorrectChars: number;
-  elapsed: number;
-  timeLeft: number;
-  energy: number;
-  progress: number;
-  countdown: number;
-  place: number;
-  series: number[];
-  perfectWords: number;
-  maxCombo: number;
-  wordErrors: number;
+export interface Engine {
+  snap: Snapshot;
+  /** Live state for the rAF-driven lane renderer. Treat as read-only outside the hook. */
+  stateRef: React.RefObject<RunState>;
+  start: () => void;
+  press: (char: string) => void;
+  backspace: () => void;
+  skip: () => void;
+  pause: () => void;
+  resume: () => void;
+  togglePause: () => void;
+  /** Leave mid-race. Returns the DNF record so the career still knows you quit. */
+  abandon: () => RunRecord | null;
 }
 
-interface Internal {
-  status: Status;
-  words: string[];
-  totalChars: number;
-  idx: number;
-  typed: string;
-  wordErrors: number;
-  correctChars: number;
-  incorrectChars: number;
-  dist: number;
-  score: number;
-  combo: number;
-  maxCombo: number;
-  mult: number;
-  perfectWords: number;
-  energy: number;
-  startedAt: number;
-  pauseStart: number;
-  pausedTotal: number;
-  elapsed: number;
-  timeLeft: number;
-  rivals: RivalState[];
-  series: number[];
-  pubSeries: number[];
-  lastSample: number;
-  lastPublish: number;
-  lastWarn: number;
-  place: number;
-  keyMisses: Record<string, number>;
-  countdown: number;
-  finished: boolean;
+interface Config {
+  mode: Mode;
+  difficulty: Difficulty;
+  onEvent: (e: GameEvent) => void;
+  /** Injectable for deterministic tests; defaults to `Math.random`. */
+  random?: () => number;
 }
 
-const DRAIN: Record<Difficulty, number> = { easy: 4.2, medium: 5.4, hard: 6.6, code: 6 };
-
-export function multFrom(combo: number) {
-  return Math.min(5, 1 + Math.floor(combo / 4));
+/** `useRef` with a lazy initial value, without the `null as unknown as T` trick. */
+function useOwnRef<T>(init: () => T): React.RefObject<T> {
+  const ref = useRef<T | null>(null);
+  if (ref.current === null) ref.current = init();
+  return ref as React.RefObject<T>;
 }
 
-function makeRivals(difficulty: Difficulty, count: number): RivalState[] {
-  const cfg = DIFFICULTIES.find((d) => d.id === difficulty)!;
-  const [lo, hi] = cfg.rivalWpm;
-  const names = [...RIVAL_NAMES].sort(() => Math.random() - 0.5).slice(0, count);
-  return names.map((n, i) => {
-    const base = lo + ((hi - lo) * (i + 0.35 + Math.random() * 0.3)) / count;
-    return {
-      name: n.name,
-      color: n.color,
-      base,
-      wpm: base,
-      drift: 0.06 + Math.random() * 0.09,
-      dist: 0,
-      progress: 0,
-      finished: false,
-      finishAt: 0,
-    };
-  });
-}
+export function useEngine({ mode, difficulty, onEvent, random }: Config): Engine {
+  const stateRef = useOwnRef<RunState>(() => createRun(mode, difficulty));
+  const [snap, setSnap] = useState<Snapshot>(() => snapshot(stateRef.current));
 
-export function useEngine(config: { mode: Mode; difficulty: Difficulty; onEvent: (e: GameEvent) => void }) {
-  const { mode, difficulty } = config;
-  const def = MODES.find((m) => m.id === mode)!;
-  const onEventRef = useRef(config.onEvent);
-  onEventRef.current = config.onEvent;
+  const timersRef = useRef<number[]>([]);
+  const rafRef = useRef(0);
+  const lastPublishRef = useRef(0);
+  const resultRef = useRef<RunRecord | null>(null);
 
-  const S = useRef<Internal>(null as unknown as Internal);
-  if (!S.current) {
-    S.current = {
-      status: "idle",
-      words: [],
-      totalChars: 0,
-      idx: 0,
-      typed: "",
-      wordErrors: 0,
-      correctChars: 0,
-      incorrectChars: 0,
-      dist: 0,
-      score: 0,
-      combo: 0,
-      maxCombo: 0,
-      mult: 1,
-      perfectWords: 0,
-      energy: 100,
-      startedAt: 0,
-      pauseStart: 0,
-      pausedTotal: 0,
-      elapsed: 0,
-      timeLeft: def.seconds ? def.seconds * 1000 : Infinity,
-      rivals: [],
-      series: [],
-      pubSeries: [],
-      lastSample: 0,
-      lastPublish: 0,
-      lastWarn: 0,
-      place: 1,
-      keyMisses: {},
-      countdown: 3,
-      finished: false,
-    };
-  }
+  // Callback identity is refreshed from an effect — refs are never written during render.
+  const handlersRef = useRef({ onEvent, random });
+  useEffect(() => {
+    handlersRef.current = { onEvent, random };
+  }, [onEvent, random]);
 
-  const [snap, setSnap] = useState<Snap>(() => snapshot(S.current, def));
-  const timers = useRef<number[]>([]);
-  const raf = useRef(0);
+  const emit = useCallback((events: GameEvent[]) => {
+    for (const e of events) handlersRef.current.onEvent(e);
+  }, []);
 
-  const publish = useCallback(() => setSnap(snapshot(S.current, def)), [def]);
+  const publish = useCallback(() => {
+    lastPublishRef.current = now();
+    setSnap(snapshot(stateRef.current));
+  }, [stateRef]);
 
-  const clearTimers = () => {
-    timers.current.forEach((t) => clearTimeout(t));
-    timers.current = [];
-  };
+  const clearTimers = useCallback(() => {
+    for (const t of timersRef.current) window.clearTimeout(t);
+    timersRef.current = [];
+  }, []);
 
-  const buildResult = useCallback(
-    (finished: boolean): RunRecord => {
-      const s = S.current;
-      const mins = Math.max(1 / 60000, s.elapsed / 60000);
-      const wpm = Math.round(s.dist / 5 / mins);
-      const rawWpm = Math.round((s.correctChars + s.incorrectChars) / 5 / mins);
-      const total = s.correctChars + s.incorrectChars;
-      const accuracy = total ? Math.round((s.correctChars / total) * 1000) / 10 : 100;
-      let score = s.score;
-      if (finished) {
-        score += s.place === 1 ? 1500 : s.place === 2 ? 800 : s.place === 3 ? 400 : 150;
-        score += Math.round(accuracy * 10);
-        if (def.seconds) score += Math.round((s.timeLeft / 1000) * 25);
-        if (def.energy) score += Math.round(s.energy * 12);
-      }
-      return {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        mode,
-        difficulty,
-        wpm,
-        rawWpm,
-        accuracy,
-        score,
-        correctChars: s.correctChars,
-        incorrectChars: s.incorrectChars,
-        words: s.idx,
-        perfectWords: s.perfectWords,
-        maxCombo: s.maxCombo,
-        place: finished ? s.place : 0,
-        durationMs: Math.round(s.elapsed),
-        finished,
-        newBadge: null,
-        date: Date.now(),
-        series: s.series.slice(),
-        keyMisses: { ...s.keyMisses },
-      };
-    },
-    [def, difficulty, mode]
-  );
+  const defer = useCallback((fn: () => void, ms: number) => {
+    timersRef.current.push(window.setTimeout(fn, ms));
+  }, []);
 
-  const finish = useCallback(
-    (finished: boolean, crashed = false) => {
-      const s = S.current;
-      if (s.status === "finished") return;
+  /** One-way door: the first call for a race wins, so a frame and a keypress can't both end it. */
+  const settle = useCallback(
+    (reason: EndReason): RunRecord | null => {
+      const s = stateRef.current;
+      if (s.status === "finished") return resultRef.current;
       s.status = "finished";
-      s.finished = finished;
+      s.endReason = reason;
+      s.pausedAt = 0;
       clearTimers();
-      void crashed;
-      const result = buildResult(finished);
+      const record = toRecord(s, stamp());
+      resultRef.current = record;
       publish();
-      onEventRef.current({ type: "finish", result });
+      handlersRef.current.onEvent({ type: "end", reason, result: record });
+      return record;
     },
-    [buildResult, publish]
+    [clearTimers, publish, stateRef],
   );
 
   const start = useCallback(() => {
     clearTimers();
-    const words = buildTrack(difficulty, def.words);
-    const s = S.current;
-    s.status = "countdown";
-    s.words = words;
-    s.totalChars = TOTAL_CHARS(words);
-    s.idx = 0;
-    s.typed = "";
-    s.wordErrors = 0;
-    s.correctChars = 0;
-    s.incorrectChars = 0;
-    s.dist = 0;
-    s.score = 0;
-    s.combo = 0;
-    s.maxCombo = 0;
-    s.mult = 1;
-    s.perfectWords = 0;
-    s.energy = def.energy ? 58 : 100;
-    s.startedAt = 0;
-    s.pauseStart = 0;
-    s.pausedTotal = 0;
-    s.elapsed = 0;
-    s.timeLeft = def.seconds ? def.seconds * 1000 : Infinity;
-    s.rivals = def.rivals ? makeRivals(difficulty, 2) : [];
-    s.series = [];
-    s.pubSeries = [];
-    s.lastSample = 0;
-    s.lastPublish = 0;
-    s.lastWarn = 0;
-    s.place = 1;
-    s.keyMisses = {};
-    s.countdown = 3;
-    s.finished = false;
+    resultRef.current = null;
+    lastPublishRef.current = 0;
+    const s = stateRef.current;
+    prepareRun(s, mode, difficulty, handlersRef.current.random);
     publish();
 
-    [3, 2, 1].forEach((n, i) => {
-      timers.current.push(
-        window.setTimeout(() => {
-          s.countdown = n;
-          publish();
-          onEventRef.current({ type: "countdown", n });
-        }, i * 520)
-      );
-    });
-    timers.current.push(
-      window.setTimeout(() => {
-        s.status = "playing";
-        s.startedAt = performance.now();
-        s.countdown = 0;
+    for (let i = 0; i < COUNTDOWN.from; i++) {
+      const n = COUNTDOWN.from - i;
+      defer(() => {
+        setCountdown(s, n);
         publish();
-        onEventRef.current({ type: "go" });
-      }, 1560)
-    );
-  }, [def, difficulty, publish]);
+        handlersRef.current.onEvent({ type: "countdown", n });
+      }, i * COUNTDOWN.stepMs);
+    }
+    defer(() => {
+      beginPlaying(s, now());
+      publish();
+      handlersRef.current.onEvent({ type: "go" });
+    }, COUNTDOWN.goMs);
+  }, [clearTimers, defer, difficulty, mode, publish, stateRef]);
 
-  const togglePause = useCallback(() => {
-    const s = S.current;
-    if (s.status === "playing") {
-      s.status = "paused";
-      s.pauseStart = performance.now();
-    } else if (s.status === "paused") {
-      s.status = "playing";
-      s.pausedTotal += performance.now() - s.pauseStart;
-    } else return;
-    publish();
-  }, [publish]);
-
-  /** main race loop */
+  /* A mid-session config change must not leave a race armed with the wrong track. */
   useEffect(() => {
-    let last = performance.now();
-    const loop = (now: number) => {
-      raf.current = requestAnimationFrame(loop);
-      const dt = Math.min(0.05, (now - last) / 1000);
-      last = now;
-      const s = S.current;
+    const s = stateRef.current;
+    if (s.status === "idle" && (s.mode !== mode || s.difficulty !== difficulty)) {
+      Object.assign(s, createRun(mode, difficulty));
+      publish();
+    }
+  }, [difficulty, mode, publish, stateRef]);
 
-      if (s.status === "playing") {
-        s.elapsed = now - s.startedAt - s.pausedTotal;
+  /* ---------------------------------------------------------------- frame loop */
+  useEffect(() => {
+    let last = now();
+    const loop = () => {
+      rafRef.current = requestAnimationFrame(loop);
+      const at = now();
+      const dtMs = at - last;
+      last = at;
 
-        // rivals
-        const t = s.elapsed / 1000;
-        for (const r of s.rivals) {
-          if (r.finished) continue;
-          const kick = r.progress > 0.82 ? 1.12 : 1;
-          r.wpm = r.base * (1 + Math.sin(t * (0.7 + r.drift * 6) + r.drift * 40) * r.drift) * kick;
-          r.dist += (r.wpm * 5 * dt) / 60;
-          r.progress = Math.min(1.25, r.dist / s.totalChars);
-          if (r.progress >= 1) {
-            r.finished = true;
-            r.finishAt = s.elapsed;
-          }
-        }
+      const s = stateRef.current;
+      if (s.status !== "playing") return;
 
-        // placement
-        const ahead = s.rivals.filter((r) => r.dist > s.dist).length;
-        const newPlace = ahead + 1;
-        if (newPlace !== s.place) {
-          onEventRef.current({
-            type: "overtake",
-            up: newPlace < s.place,
-            rival: s.rivals.find((r) => r.dist > s.dist)?.name ?? "",
-          });
-          s.place = newPlace;
-          publish();
-        }
-
-        // time attack clock
-        if (def.seconds) {
-          s.timeLeft = Math.max(0, def.seconds * 1000 - s.elapsed);
-          if (s.timeLeft <= 0) return finish(true);
-        }
-
-        // overdrive boost tank
-        if (def.energy) {
-          s.energy = Math.max(0, s.energy - DRAIN[difficulty] * dt);
-          if (s.energy <= 22 && now - s.lastWarn > 1600) {
-            s.lastWarn = now;
-            onEventRef.current({ type: "warn", energy: s.energy });
-          }
-          if (s.energy <= 0) return finish(false, true);
-        }
-
-        // wpm sampling for the live graph (kept on a stable array reference)
-        if (s.elapsed - s.lastSample > 450) {
-          s.lastSample = s.elapsed;
-          const mins = Math.max(1 / 60000, s.elapsed / 60000);
-          s.series.push(Math.round(s.dist / 5 / mins));
-          if (s.series.length > 240) s.series.shift();
-          s.pubSeries = s.series.slice(-60);
-        }
-        // 10 Hz snapshot for the clock / boost tank readouts
-        if (now - s.lastPublish > 100) {
-          s.lastPublish = now;
-          publish();
-        }
+      const out = advance(s, at, dtMs);
+      emit(out.events);
+      if (out.ended) {
+        settle(out.ended);
+        return;
+      }
+      // 10 Hz ceiling on renders while nothing is being typed (clock, boost tank, rivals).
+      if (at - lastPublishRef.current >= PUBLISH_INTERVAL_MS) {
+        lastPublishRef.current = at;
+        setSnap(snapshot(s));
       }
     };
-    raf.current = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(raf.current);
-  }, [def, difficulty, finish, publish]);
+    rafRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [emit, settle, stateRef]);
 
-  useEffect(() => () => clearTimers(), []);
+  /* ------------------------------------------------- backgrounded tab: pause, don't decay */
+  useEffect(() => {
+    const onHide = () => {
+      if (document.visibilityState !== "hidden") return;
+      const s = stateRef.current;
+      if (pauseRun(s, now())) {
+        publish();
+        handlersRef.current.onEvent({ type: "paused" });
+      }
+    };
+    document.addEventListener("visibilitychange", onHide);
+    window.addEventListener("pagehide", onHide);
+    return () => {
+      document.removeEventListener("visibilitychange", onHide);
+      window.removeEventListener("pagehide", onHide);
+    };
+  }, [publish, stateRef]);
 
+  useEffect(
+    () => () => {
+      clearTimers();
+      cancelAnimationFrame(rafRef.current);
+    },
+    [clearTimers],
+  );
+
+  /* ---------------------------------------------------------------- input */
   const press = useCallback(
     (char: string) => {
-      const s = S.current;
-      if (s.status !== "playing" || s.idx >= s.words.length) return;
-      const word = s.words[s.idx];
-      const expect = word[s.typed.length];
-      if (char === expect) {
-        s.typed += char;
-        s.correctChars++;
-        s.dist++;
-        s.score += 10 * s.mult;
-        s.energy = Math.min(100, s.energy + (def.energy ? 1.9 : 0));
-        onEventRef.current({ type: "key", char, ok: true, combo: s.combo });
-
-        if (s.typed.length === word.length) {
-          const perfect = s.wordErrors === 0;
-          if (perfect) {
-            s.combo++;
-            s.perfectWords++;
-            s.maxCombo = Math.max(s.maxCombo, s.combo);
-          } else {
-            s.combo = 0;
-          }
-          s.mult = multFrom(s.combo);
-          s.score += (50 + word.length * 10) * s.mult + (perfect ? 25 : 0);
-          s.energy = Math.min(100, s.energy + (def.energy ? 3 : 0));
-          const doneIdx = s.idx;
-          s.idx++;
-          s.typed = "";
-          s.wordErrors = 0;
-          onEventRef.current({ type: "word", word, perfect, mult: s.mult, idx: doneIdx });
-          if (s.idx >= s.words.length) {
-            publish();
-            return finish(true);
-          }
-        }
-      } else {
-        s.incorrectChars++;
-        s.wordErrors++;
-        s.combo = 0;
-        s.mult = 1;
-        s.score = Math.max(0, s.score - 15);
-        s.energy = Math.max(0, s.energy - (def.energy ? 7 : 0));
-        if (expect) s.keyMisses[expect] = (s.keyMisses[expect] || 0) + 1;
-        onEventRef.current({ type: "error", char });
-        if (def.energy && s.energy <= 0) {
-          publish();
-          return finish(false, true);
-        }
-      }
-      publish();
+      const s = stateRef.current;
+      const was = s.status;
+      const out = keyDown(s, char);
+      if (!out.dirty) return;
+      emit(out.events);
+      if (out.ended) settle(out.ended);
+      else if (was === "playing") publish();
     },
-    [def, finish, publish]
+    [emit, publish, settle, stateRef],
   );
 
   const backspace = useCallback(() => {
-    const s = S.current;
-    if (s.status !== "playing" || !s.typed) return;
-    s.typed = s.typed.slice(0, -1);
+    if (!rulesBackspace(stateRef.current)) return;
     publish();
-  }, [publish]);
-
-  /** leave mid-race: hand back a DNF result so career stats still count it */
-  const abandon = useCallback((): RunRecord | null => {
-    const s = S.current;
-    if (s.status === "finished" || s.status === "idle") return null;
-    if (s.status === "playing") s.elapsed = performance.now() - s.startedAt - s.pausedTotal;
-    s.status = "finished";
-    clearTimers();
-    return buildResult(false);
-  }, [buildResult]);
+  }, [publish, stateRef]);
 
   const skip = useCallback(() => {
-    const s = S.current;
-    if (s.status !== "playing" || s.idx >= s.words.length) return;
-    const word = s.words[s.idx];
-    s.idx++;
-    s.typed = "";
-    s.wordErrors = 0;
-    s.combo = 0;
-    s.mult = 1;
-    s.score = Math.max(0, s.score - 40);
-    onEventRef.current({ type: "skip", word });
-    if (s.idx >= s.words.length) {
+    const s = stateRef.current;
+    const out = skipWord(s);
+    if (!out.dirty) return;
+    emit(out.events);
+    if (out.ended) settle(out.ended);
+    else publish();
+  }, [emit, publish, settle, stateRef]);
+
+  const pause = useCallback(() => {
+    if (pauseRun(stateRef.current, now())) {
       publish();
-      return finish(true);
+      handlersRef.current.onEvent({ type: "paused" });
     }
-    publish();
-  }, [finish, publish]);
+  }, [publish, stateRef]);
 
-  return { snap, stateRef: S, start, press, backspace, skip, abandon, togglePause, def };
-}
+  const resume = useCallback(() => {
+    if (resumeRun(stateRef.current, now())) {
+      publish();
+      handlersRef.current.onEvent({ type: "resumed" });
+    }
+  }, [publish, stateRef]);
 
-function snapshot(s: Internal, def: (typeof MODES)[number]): Snap {
-  const total = s.correctChars + s.incorrectChars;
-  const mins = Math.max(1 / 60000, s.elapsed / 60000);
-  return {
-    status: s.status,
-    words: s.words,
-    idx: s.idx,
-    typed: s.typed,
-    score: s.score,
-    combo: s.combo,
-    mult: s.mult,
-    wpm: s.elapsed > 400 ? Math.round(s.dist / 5 / mins) : 0,
-    rawWpm: s.elapsed > 400 ? Math.round(total / 5 / mins) : 0,
-    accuracy: total ? Math.round((s.correctChars / total) * 1000) / 10 : 100,
-    correctChars: s.correctChars,
-    incorrectChars: s.incorrectChars,
-    elapsed: s.elapsed,
-    timeLeft: s.timeLeft,
-    energy: s.energy,
-    progress: s.totalChars ? Math.min(1, s.dist / s.totalChars) : 0,
-    countdown: s.countdown,
-    place: s.place,
-    series: s.pubSeries,
-    perfectWords: s.perfectWords,
-    maxCombo: s.maxCombo,
-    wordErrors: s.wordErrors,
-    // keep def referenced for mode-specific snapshots
-    ...(def ? {} : {}),
-  };
+  const togglePause = useCallback(() => {
+    const s = stateRef.current;
+    if (s.status === "playing") pause();
+    else if (s.status === "paused") resume();
+  }, [pause, resume, stateRef]);
+
+  const abandon = useCallback((): RunRecord | null => {
+    const s = stateRef.current;
+    if (s.status === "idle" || s.status === "countdown") return null;
+    if (s.status === "finished") return resultRef.current;
+    return settle("abandon");
+  }, [settle, stateRef]);
+
+  return { snap, stateRef, start, press, backspace, skip, pause, resume, togglePause, abandon };
 }

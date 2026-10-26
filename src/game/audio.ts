@@ -1,4 +1,10 @@
-/** Tiny WebAudio synth — no assets, all procedural, ~0 latency. */
+/** The constructor pair as browsers actually ship it (Safari still needs the prefixed alias). */
+type AudioCtors = { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext };
+
+/**
+ * Tiny procedural synth — no audio assets, ~0 latency, and it degrades silently when the
+ * engine is unavailable (no WebAudio, autoplay policy, or a suspended context).
+ */
 class Sfx {
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
@@ -6,34 +12,39 @@ class Sfx {
 
   private ensure(): AudioContext | null {
     if (typeof window === "undefined") return null;
-    if (!this.ctx) {
-      const Ctor = window.AudioContext || (window as any).webkitAudioContext;
-      if (!Ctor) return null;
+    if (this.ctx === null) {
+      const w = window as unknown as AudioCtors;
+      const Ctor = w.AudioContext ?? w.webkitAudioContext;
+      if (Ctor === undefined) return null;
       try {
-        this.ctx = new Ctor();
-        this.master = this.ctx.createGain();
-        this.master.gain.value = 0.5;
-        this.master.connect(this.ctx.destination);
+        const ctx = new Ctor();
+        const master = ctx.createGain();
+        master.gain.value = 0.5;
+        master.connect(ctx.destination);
+        this.ctx = ctx;
+        this.master = master;
       } catch {
+        // A blocked or exhausted audio device must never take the game down with it.
+        this.ctx = null;
+        this.master = null;
         return null;
       }
     }
-    if (this.ctx.state === "suspended") void this.ctx.resume();
-    return this.ctx;
+    const ctx = this.ctx;
+    if (ctx.state === "suspended") {
+      ctx.resume().catch(() => {
+        /* autoplay policy not satisfied yet; the next gesture will retry */
+      });
+    }
+    return ctx;
   }
 
-  unlock() {
-    this.ensure();
+  /** Call from a real user gesture; returns whether audio is live. */
+  unlock(): boolean {
+    return this.ensure() !== null;
   }
 
-  private tone(
-    freq: number,
-    dur: number,
-    type: OscillatorType = "square",
-    gain = 0.18,
-    slideTo?: number,
-    delay = 0
-  ) {
+  private tone(freq: number, dur: number, type: OscillatorType = "square", gain = 0.18, slideTo?: number, delay = 0) {
     if (this.muted) return;
     const ctx = this.ensure();
     if (!ctx || !this.master) return;
@@ -78,8 +89,8 @@ class Sfx {
   private step = 0;
 
   key(combo: number) {
-    this.step = Math.min(this.scale.length - 1, combo % this.scale.length);
-    const f = 392 * Math.pow(2, this.scale[this.step] / 12);
+    this.step = Math.min(this.scale.length - 1, Math.max(0, combo) % this.scale.length);
+    const f = 392 * Math.pow(2, (this.scale[this.step] ?? 0) / 12);
     this.tone(f, 0.06, "square", 0.09);
     this.tone(f * 2, 0.04, "sine", 0.045);
   }
@@ -99,6 +110,16 @@ class Sfx {
   error() {
     this.tone(150, 0.16, "sawtooth", 0.14, 70);
     this.noise(0.1, 0.1, 400);
+    // A broken combo also breaks the melodic ladder, so the streak starts over.
+    this.resetScale();
+  }
+
+  paused() {
+    this.tone(420, 0.14, "sine", 0.1, 280);
+  }
+
+  resumed() {
+    this.tone(300, 0.12, "sine", 0.1, 470);
   }
 
   skip() {
@@ -126,7 +147,7 @@ class Sfx {
   finish(place: number) {
     if (place === 1) {
       [0, 4, 7, 12, 16, 19].forEach((s, i) =>
-        this.tone(523 * Math.pow(2, s / 12), 0.3, "triangle", 0.16, undefined, i * 0.09)
+        this.tone(523 * Math.pow(2, s / 12), 0.3, "triangle", 0.16, undefined, i * 0.09),
       );
     } else {
       [0, 5, 7].forEach((s, i) => this.tone(392 * Math.pow(2, s / 12), 0.3, "triangle", 0.14, undefined, i * 0.11));
@@ -144,9 +165,7 @@ class Sfx {
   }
 
   badge() {
-    [0, 7, 12, 19].forEach((s, i) =>
-      this.tone(659 * Math.pow(2, s / 12), 0.25, "sine", 0.12, undefined, i * 0.07)
-    );
+    [0, 7, 12, 19].forEach((s, i) => this.tone(659 * Math.pow(2, s / 12), 0.25, "sine", 0.12, undefined, i * 0.07));
   }
 }
 

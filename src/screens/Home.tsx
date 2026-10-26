@@ -1,416 +1,354 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { motion } from "framer-motion";
-import { BarChart3, ChevronRight, Fingerprint, Gauge, Keyboard, Play, Volume2, VolumeX, Zap } from "lucide-react";
-import type { Mode, Settings, Stats } from "../game/types";
-import { DIFFICULTIES, MODES } from "../game/types";
-import { buildTrack } from "../game/words";
-import { leaderboard } from "../game/storage";
-import { WordTrack } from "../components/WordTrack";
-import { TouchKeyboard } from "../components/TouchKeyboard";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import { BarChart3, Gauge, Hand, Keyboard, Trophy, Volume2, VolumeX } from "lucide-react";
+import { DIFFICULTIES, getDifficulty, getMode, MODES, TIPS } from "../game/config";
+import { FINGER_COLOR, FINGER_KEYS, FINGER_LABEL, FINGER_ORDER } from "../game/fingers";
+import { leaderboard } from "../game/career";
 import { sfx } from "../game/audio";
-import type { FxHandle } from "../components/FxCanvas";
+import { formatPercent } from "../game/metrics";
+import type { Mode, Settings, Stats } from "../game/types";
+
+const START_KEYS = new Set(["Enter", " ", "Spacebar"]);
 
 interface Props {
+  mode: Mode;
   stats: Stats;
   settings: Settings;
-  setSettings: (s: Settings) => void;
-  fx: React.RefObject<FxHandle | null>;
-  onStart: (mode: Mode) => void;
+  /** A storage problem that the player is entitled to know about, in plain words. */
+  notice: string | null;
+  onSelectMode: (m: Mode) => void;
+  onStart: (m: Mode) => void;
+  patchSettings: (p: Partial<Settings>) => void;
   onStats: () => void;
 }
 
-const TIPS = [
-  "HOME ROW IS HOME BASE · ASDF JKL;",
-  "EYES ON THE SCREEN, NOT THE KEYS",
-  "SLOW IS SMOOTH · SMOOTH IS FAST",
-  "FOUR FLAWLESS WORDS = COMBO x2",
-  "TAB SKIPS A WORD YOU CAN'T SPELL",
-  "ZEN LANE HAS NO TIMER — LEARN NEW KEYS THERE",
-  "OVERDRIVE: EVERY CLEAN LETTER REFUELS YOU",
-];
+const TOGGLES: { key: keyof Settings; label: string; icon: typeof Volume2 }[] = [
+  { key: "sound", label: "SOUND", icon: Volume2 },
+  { key: "fingerGuide", label: "FINGER GUIDE", icon: Hand },
+  { key: "showKeyboard", label: "ON-SCREEN KEYS", icon: Keyboard },
+  { key: "screenShake", label: "SCREEN SHAKE", icon: Gauge },
+] as const;
 
-export default function Home({ stats, settings, setSettings, fx, onStart, onStats }: Props) {
-  const [mode, setMode] = useState<Mode>("sprint");
-  const def = MODES.find((m) => m.id === mode)!;
-
-  /* ---------- attract-mode demo (also fully playable) ---------- */
-  const demoWords = useMemo(() => buildTrack("easy", 12), []);
-  const d = useRef({ idx: 0, typed: "", perfect: [] as boolean[], hold: 0, advance: false, errs: 0 });
-  const lastUser = useRef(0);
-  const [, force] = useReducer((x: number) => x + 1, 0);
-  const [flash, setFlash] = useState<{ k: string; n: number; ok: boolean } | null>(null);
-  const [autoPilot, setAutoPilot] = useState(true);
-
-  const demoPress = (ch: string, byUser: boolean) => {
-    const s = d.current;
-    const w = demoWords[s.idx] ?? "";
-    if (byUser) {
-      lastUser.current = performance.now();
-      setAutoPilot(false);
-    }
-    if (ch === w[s.typed.length]) {
-      s.typed += ch;
-      setFlash({ k: ch, n: performance.now(), ok: true });
-      if (s.typed.length === w.length) {
-        s.advance = true;
-        s.hold = byUser ? 2 : 4;
-        s.perfect[s.idx] = s.errs === 0;
-        s.errs = 0;
-      }
-    } else {
-      s.errs++;
-      setFlash({ k: ch, n: performance.now(), ok: false });
-      if (byUser) fx.current?.burst(window.innerWidth / 2, window.innerHeight * 0.5, "#ff5a7a", 10, 0.9);
-    }
-    force();
-  };
+/** A mode card *selects*; only START (or ⏎) launches. No accidental races. */
+export default function Home({ mode, stats, settings, notice, onSelectMode, onStart, patchSettings, onStats }: Props) {
+  const reduce = useReducedMotion();
+  const [tip, setTip] = useState(0);
+  const armedRef = useRef(false);
+  const def = getMode(mode);
+  const diff = getDifficulty(settings.difficulty);
+  const best = stats.best[mode];
 
   useEffect(() => {
-    const id = window.setInterval(() => {
-      const s = d.current;
-      if (!autoPilot && performance.now() - lastUser.current < 3200) return;
-      if (!autoPilot && performance.now() - lastUser.current >= 3200) setAutoPilot(true);
-      if (s.hold > 0) {
-        s.hold--;
-        if (s.hold === 0 && s.advance) {
-          s.advance = false;
-          s.idx = (s.idx + 1) % demoWords.length;
-          s.typed = "";
-        }
-        force();
-        return;
-      }
-      const w = demoWords[s.idx] ?? "";
-      if (w) demoPress(w[s.typed.length], false);
-    }, 105);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoPilot, demoWords]);
+    const id = window.setInterval(() => setTip((t) => (t + 1) % TIPS.length), 5200);
+    return () => window.clearInterval(id);
+  }, []);
 
-  /* ---------- global shortcuts ---------- */
+  // The on-screen keyboard is only a good idea on a touch device unless the player forced it.
+  const marquee = useMemo(() => {
+    const pool = [
+      "KEYRUSH",
+      ...MODES.map((m) => m.tag),
+      ...DIFFICULTIES.map((d) => d.name),
+      "COMBO",
+      "PERFECT",
+      "SPLIT",
+      "LAP",
+    ];
+    return pool;
+  }, []);
+
+  const launch = useCallback(
+    (m: Mode) => {
+      if (armedRef.current) return;
+      armedRef.current = true;
+      // This gesture is what WebAudio is waiting for; without it the first race is silent.
+      sfx.unlock();
+      sfx.ui();
+      onStart(m);
+    },
+    [onStart],
+  );
+
   useEffect(() => {
-    const down = (ev: KeyboardEvent) => {
-      if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        onStart(mode);
-        return;
-      }
-      const n = Number(ev.key);
-      if (n >= 1 && n <= MODES.length) {
-        ev.preventDefault();
-        setMode(MODES[n - 1].id);
-        sfx.ui(true);
-        return;
-      }
-      if (ev.key === "Backspace") {
-        ev.preventDefault();
-        d.current.typed = d.current.typed.slice(0, -1);
-        lastUser.current = performance.now();
-        setAutoPilot(false);
-        force();
-        return;
-      }
-      if (ev.key.length === 1 && !ev.repeat && ev.key !== " ") {
-        ev.preventDefault();
-        demoPress(ev.key, true);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+      const el = e.target as HTMLElement | null;
+      const interactive = el !== null && /^(BUTTON|A|INPUT|SELECT|TEXTAREA)$/.test(el.tagName);
+      if (interactive && el?.tagName !== "BODY") return;
+      if (START_KEYS.has(e.key)) {
+        e.preventDefault();
+        launch(mode);
       }
     };
-    window.addEventListener("keydown", down, { passive: false });
-    return () => window.removeEventListener("keydown", down);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mode, onStart, onStats]);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      armedRef.current = false;
+    };
+  }, [mode, launch]);
 
-  const board = useMemo(() => leaderboard(stats), [stats]);
-  const nextKey = demoWords[d.current.idx]?.[d.current.typed.length] ?? "";
+  const recent = leaderboard(stats, undefined, 5);
 
   return (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="h-full w-full overflow-y-auto overscroll-contain">
-      <div className="mx-auto flex w-full max-w-[1180px] flex-col gap-3 px-3 pt-3 pb-2 sm:px-5 sm:pt-5">
-        {/* ---- header ---- */}
-        <header className="flex flex-wrap items-center gap-3">
-          <div className="flex items-end gap-2">
-            <motion.div
-              initial={{ rotate: -8, scale: 0.8, opacity: 0 }}
-              animate={{ rotate: -2.5, scale: 1, opacity: 1 }}
-              transition={{ type: "spring", stiffness: 260, damping: 16 }}
-              className="font-display text-[clamp(2rem,6.5vw,3.4rem)] leading-[0.85] tracking-tight"
-            >
-              <span className="text-cream">KEY</span>
-              <span className="text-amber">RUSH</span>
-            </motion.div>
-            <div className="mb-1 hidden sm:block">
-              <div className="label-xs text-mute">Arcade typing racer</div>
-              <div className="label-xs text-coral">Touch + keyboard</div>
-            </div>
-          </div>
+    <div className="screen-scroll relative h-full w-full overflow-y-auto">
+      <div
+        className="pointer-events-none absolute inset-x-0 top-0 z-0 h-12 overflow-hidden border-b border-line/60"
+        aria-hidden
+      >
+        <motion.div
+          className="flex h-full w-max items-center gap-8 whitespace-nowrap px-6 font-display text-2xl tracking-[0.24em] text-cream/10"
+          animate={reduce === true ? false : { x: ["0%", "-50%"] }}
+          transition={{ duration: 30, ease: "linear", repeat: Infinity }}
+        >
+          {[...marquee, ...marquee].map((w, i) => (
+            <span key={`${w}-${i}`}>{w}</span>
+          ))}
+        </motion.div>
+      </div>
 
-          <div className="ml-auto flex flex-wrap items-center gap-1.5">
-            <div className="flex items-center gap-1 rounded-xl border border-line bg-panel px-1.5 py-1">
-              <Gauge size={13} className="ml-1 text-mute" />
-              {DIFFICULTIES.map((dl) => (
-                <button
-                  key={dl.id}
-                  onClick={() => {
-                    setSettings({ ...settings, difficulty: dl.id });
-                    sfx.ui();
-                  }}
-                  title={dl.hint}
-                  className={`label-xs rounded-lg px-2 py-1.5 transition-all ${
-                    settings.difficulty === dl.id ? "text-ink" : "text-mute hover:text-cream"
-                  }`}
-                  style={settings.difficulty === dl.id ? { background: "#ffb020" } : undefined}
-                >
-                  {dl.name}
-                </button>
-              ))}
-            </div>
-            <IconToggle
-              on={settings.fingerGuide}
-              onClick={() => setSettings({ ...settings, fingerGuide: !settings.fingerGuide })}
-              title="Finger guide (colour-coded keys)"
+      <div className="relative z-10 mx-auto grid min-h-full w-full max-w-6xl grid-cols-1 gap-5 px-4 pb-16 pt-16 sm:px-6 lg:grid-cols-[1.35fr_1fr]">
+        <div className="flex flex-col justify-center gap-6">
+          <header>
+            <p className="label-xs mb-3 text-amber">
+              Arcade typing circuit ·{" "}
+              {stats.totals.races > 0
+                ? `${stats.totals.races} race${stats.totals.races > 1 ? "s" : ""} logged`
+                : "no races yet"}
+            </p>
+            <h1 className="font-display text-[15vw] leading-[0.82] tracking-tight sm:text-[9.5rem] lg:text-[8rem]">
+              <span className="block text-cream drop-shadow-[0_0_36px_rgba(255,184,0,0.2)]">KEY</span>
+              <span className="-mt-[0.1em] block text-amber drop-shadow-[0_0_44px_rgba(255,90,122,0.45)]">RUSH</span>
+            </h1>
+            <p className="mt-4 max-w-lg text-sm leading-relaxed text-cream/70 sm:text-base">
+              {def.blurb} {def.seconds !== null ? `A ${def.seconds}s clock. ` : ""}
+              {def.rivals
+                ? `You race a ${def.id === "zen" ? "quiet" : "live "}field. `
+                : "No rivals — just you and the words. "}
+              Every clean keystroke feeds your boost; every mistake costs points.
+            </p>
+            <motion.p
+              key={tip}
+              initial={{ opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="label-xs mt-3 text-mute"
             >
-              <Fingerprint size={15} />
-            </IconToggle>
-            <IconToggle
-              on={settings.showKeyboard}
-              onClick={() => setSettings({ ...settings, showKeyboard: !settings.showKeyboard })}
-              title="On-screen keyboard"
-            >
-              <Keyboard size={15} />
-            </IconToggle>
-            <IconToggle
-              on={settings.sound}
-              onClick={() => {
-                sfx.unlock();
-                setSettings({ ...settings, sound: !settings.sound });
-                sfx.muted = settings.sound;
-                sfx.ui();
-              }}
-              title="Sound"
-            >
-              {settings.sound ? <Volume2 size={15} /> : <VolumeX size={15} />}
-            </IconToggle>
-            <button
-              onClick={onStats}
-              className="btn-3d flex items-center gap-1.5 rounded-xl border border-line bg-panel-2 px-3 py-2 font-display text-[11px] text-cream transition-colors hover:border-sky hover:text-sky"
-            >
-              <BarChart3 size={14} /> CAREER
-            </button>
-          </div>
-        </header>
+              TIP · {TIPS[tip]}
+            </motion.p>
+          </header>
 
-        {/* ---- main split ---- */}
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.08fr)]">
-          {/* modes */}
-          <section className="order-2 flex flex-col gap-2 lg:order-1">
-            <div className="flex items-baseline gap-2">
-              <h2 className="font-display text-xl text-cream">PICK YOUR RACE</h2>
-              <span className="label-xs text-mute">keys 1-4</span>
-            </div>
-            {MODES.map((m, i) => {
-              const best = stats.best[m.id];
+          <div role="radiogroup" aria-label="Race mode" className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            {MODES.map((m) => {
               const active = m.id === mode;
               return (
-                <motion.button
+                <button
                   key={m.id}
-                  onClick={(e) => {
-                    sfx.ui(active);
-                    if (active) {
-                      const r = e.currentTarget.getBoundingClientRect();
-                      fx.current?.burst(r.left + r.width / 2, r.top + r.height / 2, m.accent, 18, 1.1);
-                      onStart(m.id);
-                    } else setMode(m.id);
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => {
+                    sfx.tick(1);
+                    onSelectMode(m.id);
                   }}
-                  whileHover={{ x: 4 }}
-                  whileTap={{ scale: 0.985 }}
-                  className="panel group relative overflow-hidden rounded-xl px-3 py-2.5 text-left"
-                  style={{
-                    borderColor: active ? m.accent : undefined,
-                    boxShadow: active ? `0 0 0 1px ${m.accent}, 0 16px 34px -22px ${m.accent}` : undefined,
-                  }}
+                  className={`panel relative overflow-hidden rounded-xl p-3 text-left transition-all ${
+                    active
+                      ? "-translate-y-1 shadow-[0_20px_44px_-20px_rgba(0,0,0,0.75)]"
+                      : "opacity-80 hover:opacity-100"
+                  }`}
+                  style={{ borderColor: active ? m.accent : "var(--color-line)" }}
                 >
-                  <span className="absolute inset-y-0 left-0 w-[5px]" style={{ background: active ? m.accent : "#2c3866" }} />
-                  <div className="flex items-center gap-3 pl-2">
-                    <span
-                      className="font-display text-2xl leading-none sm:text-3xl"
-                      style={{ color: active ? m.accent : "#2c3866" }}
-                    >
-                      0{i + 1}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="font-display text-base leading-none text-cream sm:text-lg">{m.name}</span>
-                        <span
-                          className="label-xs rounded px-1.5 py-0.5"
-                          style={{ color: m.accent, background: `${m.accent}1f` }}
-                        >
-                          {m.tag}
-                        </span>
-                      </div>
-                      <p className="mt-1 truncate font-mono text-[11px] text-mute">{m.blurb}</p>
-                    </div>
-                    <div className="shrink-0 text-right">
-                      <div className="label-xs text-mute">best</div>
-                      <div className="font-display text-lg leading-none" style={{ color: best ? m.accent : "#2c3866" }}>
-                        {best ? best.wpm : "—"}
-                      </div>
-                    </div>
-                    <ChevronRight size={18} className="shrink-0 text-mute transition-transform group-hover:translate-x-1" style={{ color: active ? m.accent : undefined }} />
+                  <div className="mb-1 flex items-center gap-1.5">
+                    <span className="h-2.5 w-2.5 rounded-sm" style={{ background: m.accent }} aria-hidden />
+                    <h2 className="font-display text-sm" style={{ color: active ? m.accent : undefined }}>
+                      {m.name}
+                    </h2>
                   </div>
-                </motion.button>
+                  <p className="label-xs font-mono leading-relaxed text-mute">{m.tag}</p>
+                  <p className="mt-2 font-mono text-[10px] text-cream/50">
+                    {m.words} words{m.seconds !== null ? ` · ${m.seconds}s` : " · untimed"}
+                    {m.energy ? " · boost tank" : ""}
+                  </p>
+                  <p className="mt-0.5 font-mono text-[10px] text-cream/50">
+                    PB {stats.best[m.id] ? `${stats.best[m.id]?.wpm} WPM` : "—"}
+                    {stats.best[m.id] ? ` · ${stats.best[m.id]?.score.toLocaleString()} pts` : ""}
+                  </p>
+                  {active && (
+                    <span className="absolute inset-x-0 top-0 h-[3px]" style={{ background: m.accent }} aria-hidden />
+                  )}
+                </button>
               );
             })}
+          </div>
 
-            <motion.button
-              onClick={() => onStart(mode)}
-              whileHover={{ scale: 1.01 }}
-              whileTap={{ scale: 0.98 }}
-              className="btn-3d mt-1 flex items-center justify-center gap-3 rounded-2xl px-6 py-4 font-display text-lg text-ink sm:text-2xl"
-              style={{ background: def.accent }}
+          <div>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <h2 className="font-display text-sm">TRACK DIFFICULTY</h2>
+              <button
+                type="button"
+                onClick={onStats}
+                className="label-xs flex items-center gap-1.5 text-mute transition-colors hover:text-cream"
+              >
+                <BarChart3 size={13} aria-hidden /> CAREER ({stats.totals.races})
+              </button>
+            </div>
+            <div
+              role="radiogroup"
+              aria-label="Difficulty"
+              className="flex flex-wrap items-stretch gap-1 rounded-xl border border-line bg-ink-2 p-1"
             >
-              <Play size={22} fill="currentColor" /> START {def.name}
-              <span className="rounded border border-ink/25 px-1.5 py-0.5 font-mono text-[10px] opacity-70">ENTER</span>
-            </motion.button>
+              {DIFFICULTIES.map((d) => {
+                const on = d.id === settings.difficulty;
+                return (
+                  <button
+                    key={d.id}
+                    type="button"
+                    role="radio"
+                    aria-checked={on}
+                    onClick={() => {
+                      sfx.ui();
+                      patchSettings({ difficulty: d.id });
+                    }}
+                    className={`flex-1 rounded-lg px-2 py-2 font-display text-[10px] transition-colors sm:text-xs ${
+                      on
+                        ? "bg-amber text-ink shadow-[inset_0_1px_0_rgba(255,255,255,0.35)]"
+                        : "text-mute hover:text-cream"
+                    }`}
+                  >
+                    {d.name}
+                    <span
+                      className={`ml-1.5 hidden font-mono text-[9px] sm:inline ${on ? "text-ink/60" : "text-mute/70"}`}
+                    >
+                      {d.hint}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="label-xs mt-2 text-mute">
+              {diff.name}: rival field {diff.rivalWpm[0]}–{diff.rivalWpm[1]} WPM · {diff.hint}
+              {def.energy ? ` · boost drain ${diff.drain}/s` : ""}
+            </p>
+          </div>
 
-            <div className="grid grid-cols-4 gap-2">
-              {[
-                ["BEST WPM", String(stats.totals.bestWpm), "#ffb020"],
-                ["RACES", String(stats.runs.length), "#4cc9ff"],
-                ["WORDS", String(stats.totals.words), "#35e0a1"],
-                ["WINS", String(stats.totals.firstPlaces), "#ff5a7a"],
-              ].map(([k, v, c]) => (
-                <div key={k} className="panel rounded-lg px-2 py-1.5 text-center">
-                  <div className="label-xs text-mute">{k}</div>
-                  <div className="font-display text-base leading-tight sm:text-lg" style={{ color: c }}>
-                    {v}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
+            <button
+              type="button"
+              onClick={() => launch(mode)}
+              className="btn-3d flex items-center justify-center gap-3 rounded-xl bg-amber px-6 py-4 font-display text-2xl text-ink sm:text-3xl"
+            >
+              START ENGINE <span className="text-sm opacity-60">⏎</span>
+            </button>
+            <div className="flex flex-wrap gap-1.5" role="group" aria-label="Game toggles">
+              {TOGGLES.map(({ key, label, icon: Icon }) => {
+                const on = settings[key] === true;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    aria-pressed={on}
+                    onClick={() => {
+                      sfx.ui();
+                      patchSettings({ [key]: !on });
+                    }}
+                    className={`label-xs flex items-center gap-1.5 rounded-lg border px-2.5 py-2 transition-colors ${
+                      on
+                        ? "border-mint/60 bg-mint/12 text-mint"
+                        : "border-line bg-panel-2/60 text-mute hover:text-cream"
+                    }`}
+                  >
+                    {key === "sound" && !on ? <VolumeX size={13} aria-hidden /> : <Icon size={13} aria-hidden />}
+                    {label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {notice !== null && (
+            <p
+              role="alert"
+              className="rounded-lg border border-amber/50 bg-amber/10 p-3 text-[11px] leading-relaxed text-amber"
+            >
+              {notice}
+            </p>
+          )}
+        </div>
+
+        <div className="flex flex-col gap-4">
+          <section className="panel rounded-xl p-4" aria-labelledby="fingormap-h">
+            <div className="mb-3 flex items-center gap-2">
+              <Hand size={16} className="text-cream/70" aria-hidden />
+              <h2 id="fingormap-h" className="font-display text-sm">
+                FINGER MAP
+              </h2>
+              <span className="label-xs ml-auto text-mute">{settings.fingerGuide ? "guide on" : "guide off"}</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+              {FINGER_ORDER.map((f) => (
+                <div key={f} className="rounded-lg border border-line/70 bg-ink-2/60 p-2">
+                  <div className="label-xs mb-1.5 font-bold" style={{ color: FINGER_COLOR[f] }}>
+                    {FINGER_LABEL[f]}
+                  </div>
+                  <div className="flex flex-wrap gap-1">
+                    {FINGER_KEYS[f].map((k) => (
+                      <span
+                        key={k}
+                        className="rounded-[4px] border px-1 py-[3px] font-mono text-[10px] font-bold leading-none text-cream"
+                        style={{ borderColor: `${FINGER_COLOR[f]}66`, background: `${FINGER_COLOR[f]}1a` }}
+                      >
+                        {k === " " ? "SPACE" : k.toUpperCase()}
+                      </span>
+                    ))}
                   </div>
                 </div>
               ))}
             </div>
+            <p className="mt-2 text-[10px] leading-relaxed text-mute">
+              These are the same colours the on-screen keyboard and the career charts use — one table, one source of
+              truth.
+            </p>
           </section>
 
-          {/* attract panel */}
-          <section className="order-1 flex flex-col gap-2 lg:order-2">
-            <div className="panel relative overflow-hidden rounded-2xl">
-              <div className="pointer-events-none absolute inset-0 opacity-70">
-                <div className="road-stripes road-stripes-slow absolute inset-x-0 top-0 h-full" />
-              </div>
-              <div className="relative flex items-center justify-between border-b border-line px-3 py-2">
-                <span className="label-xs flex items-center gap-1.5 text-amber">
-                  <Zap size={12} /> {autoPilot ? "ATTRACT MODE — TYPE ALONG!" : "YOU'RE DRIVING"}
-                </span>
-                <span className="label-xs text-mute">warm-up lane · no score</span>
-              </div>
-              <div className="relative px-2 py-2">
-                <WordTrack
-                  words={demoWords}
-                  idx={d.current.idx}
-                  typed={d.current.typed}
-                  accent="#4cc9ff"
-                  perfect={d.current.perfect}
-                />
-              </div>
-              <div className="relative border-t border-line bg-ink/40 px-2 py-2">
-                <TouchKeyboard
-                  nextKey={nextKey}
-                  word={demoWords[d.current.idx]}
-                  flash={flash}
-                  guide={settings.fingerGuide}
-                  onPress={(ch) => demoPress(ch, true)}
-                  onBack={() => {
-                    d.current.typed = d.current.typed.slice(0, -1);
-                    lastUser.current = performance.now();
-                    setAutoPilot(false);
-                    force();
-                  }}
-                  onSkip={() => {
-                    d.current.idx = (d.current.idx + 1) % demoWords.length;
-                    d.current.typed = "";
-                    force();
-                  }}
-                  compact
-                />
-              </div>
+          <section className="panel rounded-xl p-4" aria-labelledby="form-h">
+            <div className="mb-3 flex items-center gap-2">
+              <Trophy size={16} className="text-amber/80" aria-hidden />
+              <h2 id="form-h" className="font-display text-sm">
+                BEST RUNS
+              </h2>
             </div>
-
-            <div className="panel rounded-2xl px-3 py-3">
-              <div className="flex items-center justify-between">
-                <span className="label-xs text-mute">Hall of fame · top scores</span>
-                <button onClick={onStats} className="label-xs text-sky hover:underline">
-                  ALL STATS →
-                </button>
-              </div>
-              <div className="mt-2 flex flex-col gap-1">
-                {board.length === 0 && (
-                  <p className="py-3 text-center font-mono text-[11px] text-mute">
-                    Empty grid. Set the first record.
-                  </p>
-                )}
-                {board.map((r, i) => {
-                  const m = MODES.find((x) => x.id === r.mode)!;
-                  return (
-                    <div key={r.id} className="flex items-center gap-2 rounded-lg border border-line/60 bg-ink-2/50 px-2 py-1.5">
-                      <span className="font-display text-xs" style={{ color: i === 0 ? "#ffb020" : i === 1 ? "#4cc9ff" : "#8b96c4" }}>
-                        {i + 1}
-                      </span>
-                      <span className="h-2 w-2 rounded-full" style={{ background: m.accent }} />
-                      <span className="font-mono text-[11px] text-cream">
-                        {r.wpm} wpm · {r.accuracy}%
-                      </span>
-                      <span className="label-xs ml-auto text-mute">{m.tag}</span>
-                      <span className="font-display text-xs text-cream">{r.score.toLocaleString()}</span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
+            {recent.length === 0 ? (
+              <p className="text-[11px] leading-relaxed text-mute">
+                No eligible race yet. Finish one without skipping a word and it lands here — and starts your records.
+              </p>
+            ) : (
+              <ul className="flex flex-col gap-1.5">
+                {recent.map((r, i) => (
+                  <li key={r.id} className="flex items-center gap-2 rounded-lg border border-line/70 bg-ink-2/60 p-2">
+                    <span className="font-display text-xs text-amber/90">#{i + 1}</span>
+                    <span className="text-[10px] uppercase tracking-widest text-cream/70">
+                      {getMode(r.mode).name} · {getDifficulty(r.difficulty).name}
+                    </span>
+                    <span className="ml-auto font-mono text-[10px] text-cream/60">
+                      {r.wpm} WPM · {formatPercent(r.accuracy)} · {r.score.toLocaleString()}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {best !== null && best !== undefined && (
+              <p className="label-xs mt-3 flex flex-wrap gap-x-2 text-mute">
+                <span className="text-amber">PERSONAL BEST · {mode}</span>
+                <span>{best.wpm} WPM</span>
+                <span>{formatPercent(best.accuracy)}</span>
+                <span>{best.score.toLocaleString()} pts</span>
+              </p>
+            )}
+            <p className="mt-3 text-[10px] leading-relaxed text-mute">
+              Results are stored only in this browser (localStorage) — nothing is uploaded, and the wipe control lives
+              on the career screen.
+            </p>
           </section>
         </div>
       </div>
-
-      {/* ---- ticker ---- */}
-      <div className="sticky bottom-0 mt-1 overflow-hidden border-y border-line bg-ink/85 py-1.5 backdrop-blur">
-        <div className="marquee-track gap-8">
-          {[0, 1].map((dup) => (
-            <div key={dup} className="flex shrink-0 gap-8">
-              {TIPS.map((t) => (
-                <span key={t} className="label-xs whitespace-nowrap text-mute">
-                  <span className="text-amber">▸</span> {t}
-                </span>
-              ))}
-            </div>
-          ))}
-        </div>
-      </div>
-    </motion.div>
-  );
-}
-
-function IconToggle({
-  on,
-  onClick,
-  title,
-  children,
-}: {
-  on: boolean;
-  onClick: () => void;
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      title={title}
-      aria-pressed={on}
-      className="btn-3d grid h-[38px] w-[38px] place-items-center rounded-xl border transition-colors"
-      style={{
-        borderColor: on ? "#35e0a1" : "#2c3866",
-        color: on ? "#35e0a1" : "#8b96c4",
-        background: on ? "rgba(53,224,161,.12)" : "rgba(20,27,52,.9)",
-      }}
-    >
-      {children}
-    </button>
+    </div>
   );
 }

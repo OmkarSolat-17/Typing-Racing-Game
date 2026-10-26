@@ -1,0 +1,121 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Lint · Typecheck · Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install (frozen lockfile — a missing entry is a failure, not an install)
+        run: npm ci
+
+      - name: Formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests + coverage floors
+        run: npm run test:coverage
+
+  build:
+    name: Build & bundle budget
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build:fast
+      - name: Enforce the payload budget (gzip bytes of dist/index.html)
+        # This build inlines *everything* (index.html is the whole app: JS, CSS and three
+        # latin-subset woff2 faces, ~95 kB of the total, base64'd by vite-plugin-singlefile).
+        # The budget therefore covers one self-contained document, not a chunk graph. If this
+        # fails, the cheapest wins are: drop a weight from src/index.css's @font-face rules,
+        # or serve the fonts as separate files instead of inlining them. Do not "fix" it by
+        # re-adding a Google Fonts request — no third-party render-blocking origin is a
+        # deliberate property of this app.
+        run: |
+          set -euo pipefail
+          SIZE=$(gzip -9 -c dist/index.html | wc -c)
+          LIMIT=$((260 * 1024))
+          echo "gzip payload: ${SIZE} bytes (budget ${LIMIT})"
+          if [ "${SIZE}" -gt "${LIMIT}" ]; then
+            echo "::error::bundle grew past the ${LIMIT} byte gzip budget"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist
+          retention-days: 7
+
+  security:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      # Runtime deps only: dev-server advisories are handled by the pin bump, not by a red build.
+      - run: npm run audit:ci
+
+  docker:
+    name: Docker smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t keyrush:ci .
+      - name: Serve the image and check it answers
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name keyrush-ci -p 8080:8080 keyrush:ci
+          trap 'docker logs keyrush-ci || true; docker stop keyrush-ci' EXIT
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/healthz >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "::error::/healthz never answered"
+          exit 1
+      - name: Assert the security headers ship
+        run: |
+          set -euo pipefail
+          docker run -d --rm --name keyrush-h -p 8081:8080 keyrush:ci
+          trap 'docker stop keyrush-h' EXIT
+          sleep 2
+          HEADERS=$(curl -fsSI http://127.0.0.1:8081/ | tr -d '\r')
+          echo "$HEADERS"
+          echo "$HEADERS" | grep -qi 'content-security-policy'
+          echo "$HEADERS" | grep -qi 'x-content-type-options: nosniff'

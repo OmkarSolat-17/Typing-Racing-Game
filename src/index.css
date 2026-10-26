@@ -1,10 +1,64 @@
+/*
+ * Typography, self-hosted.
+ *
+ * The `@fontsource` packages supply the binaries; the `@font-face` rules below are written
+ * out instead of importing the packages' `index.css` on purpose, for two reasons that both
+ * show up in the byte count of this single-file build:
+ *
+ *  • `index.css` declares every subset (latin, latin-ext, vietnamese, cyrillic, greek) and a
+ *    `.woff` fallback next to each `.woff2`. Vite's `inlineAssets` inlines *all* of them as
+ *    base64, and woff2 is already compressed — that alone was 220 kB of gzipped payload for
+ *    glyphs this game never renders. Only the latin subset is declared, and woff2 is the only
+ *    format (supported by every browser since 2016, and by every engine this app targets).
+ *  • the variable axes stay variable: one file covers weights 300–700, which is what the
+ *    display and mono scales need.
+ *
+ * The trade-off is honest and documented: a player pasting a Cyrillic word into a future
+ * custom-text mode would see a fallback face for those glyphs. `font-display: swap` keeps the
+ * first paint unblocked either way, and glyph metrics still come from the same files on every
+ * load — which matters more in a typing game than anywhere else, because the caret sits on
+ * them.
+ */
+@font-face {
+  font-family: "Bungee";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url("@fontsource/bungee/files/bungee-latin-400-normal.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Space Grotesk Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url("@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2")
+    format("woff2-variations");
+}
+
+@font-face {
+  font-family: "JetBrains Mono Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 800;
+  src: url("@fontsource-variable/jetbrains-mono/files/jetbrains-mono-latin-wght-normal.woff2")
+    format("woff2-variations");
+}
+
 @import "tailwindcss";
 
+/*
+ * The palette below is the source of truth for CSS. `src/game/config.ts#PALETTE` mirrors
+ * the handful of values that must be handed to canvas/SVG/inline-style APIs as literals.
+ * Change a colour in one place and the other is asserted by tests/palette.test.ts.
+ */
 @theme {
   --color-ink: #080b18;
-  --color-ink-2: #0d1226;
+  --color-ink-deep: #05070f;
   --color-panel: #141b34;
   --color-panel-2: #1b2444;
+  /* top/bottom fade of the word lane — a lightened `panel`, kept here so no raw hex reaches a .tsx */
+  --color-panel-fade: #131a33;
   --color-line: #2c3866;
   --color-cream: #f3efe4;
   --color-mute: #8b96c4;
@@ -14,9 +68,9 @@
   --color-sky: #4cc9ff;
   --color-grape: #a78bfa;
 
-  --font-display: "Bungee", "Arial Black", sans-serif;
-  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
+  --font-display: "Bungee", "Arial Black", system-ui, sans-serif;
+  --font-sans: "Space Grotesk Variable", "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, "SFMono-Regular", monospace;
 }
 
 @layer base {
@@ -25,32 +79,62 @@
   #root {
     height: 100%;
   }
+
+  html {
+    /* iOS Safari's dynamic toolbar changes this mid-session; `dvh` keeps the board aligned. */
+    color-scheme: dark;
+  }
+
   body {
     margin: 0;
     background: var(--color-ink);
     color: var(--color-cream);
     font-family: var(--font-sans);
+    /* Overflow is opt-in per screen (`.screen-scroll`); a race must never rubber-band,
+       but a menu that does not fit a short viewport must still be scrollable. */
     overflow: hidden;
     overscroll-behavior: none;
     -webkit-tap-highlight-color: transparent;
     -webkit-user-select: none;
     user-select: none;
     touch-action: manipulation;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    padding-bottom: env(safe-area-inset-bottom, 0px);
   }
+
   button {
     font-family: inherit;
     cursor: pointer;
   }
+
+  :focus-visible {
+    outline: 2px solid var(--color-amber);
+    outline-offset: 2px;
+  }
+
   ::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
+
   ::-webkit-scrollbar-track {
     background: transparent;
   }
+
   ::-webkit-scrollbar-thumb {
     background: var(--color-line);
     border-radius: 99px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.001ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.001ms !important;
+    }
   }
 }
 
@@ -75,6 +159,7 @@
   background-image: radial-gradient(rgba(139, 150, 196, 0.22) 1px, transparent 1px);
   background-size: 26px 26px;
   mask-image: radial-gradient(80% 60% at 50% 40%, #000 20%, transparent 80%);
+  -webkit-mask-image: radial-gradient(80% 60% at 50% 40%, #000 20%, transparent 80%);
 }
 
 .scanlines {
@@ -100,6 +185,7 @@
     background-position-y: 120px;
   }
 }
+
 .road-stripes {
   background-image: repeating-linear-gradient(
     to bottom,
@@ -110,27 +196,10 @@
   );
   animation: road-scroll 1.1s linear infinite;
 }
+
 .road-stripes-slow {
   animation-duration: 3.4s;
   opacity: 0.45;
-}
-
-@keyframes drift {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1);
-    opacity: 0.5;
-  }
-  50% {
-    transform: translate3d(2%, -3%, 0) scale(1.08);
-    opacity: 0.8;
-  }
-  100% {
-    transform: translate3d(0, 0, 0) scale(1);
-    opacity: 0.5;
-  }
-}
-.drift {
-  animation: drift 9s ease-in-out infinite;
 }
 
 /* ---------- marquee ---------- */
@@ -142,13 +211,14 @@
     transform: translateX(-50%);
   }
 }
+
 .marquee-track {
   display: flex;
   width: max-content;
   animation: marquee 26s linear infinite;
 }
 
-/* ---------- misc ---------- */
+/* ---------- surfaces ---------- */
 .panel {
   background: linear-gradient(180deg, rgba(27, 36, 68, 0.92), rgba(15, 20, 42, 0.92));
   border: 1px solid var(--color-line);
@@ -167,6 +237,7 @@
     box-shadow 90ms ease,
     filter 140ms ease;
 }
+
 .btn-3d:active {
   transform: translateY(5px);
   box-shadow:
@@ -174,35 +245,25 @@
     0 1px 0 0 rgba(0, 0, 0, 0.45);
 }
 
-.text-outline {
-  -webkit-text-stroke: 2px var(--color-line);
-  color: transparent;
+@media (hover: hover) {
+  .btn-3d:hover {
+    filter: brightness(1.06);
+  }
 }
 
 .no-touch-callout {
   -webkit-touch-callout: none;
 }
 
-@keyframes pulse-ring {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 176, 32, 0.55);
-  }
-  70% {
-    box-shadow: 0 0 0 14px rgba(255, 176, 32, 0);
-  }
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 176, 32, 0);
-  }
-}
-.pulse-ring {
-  animation: pulse-ring 1.1s ease-out infinite;
+/* Screens that scroll (menus, career) opt in; the race screen deliberately does not. */
+.screen-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .road-stripes,
-  .marquee-track,
-  .drift,
-  .pulse-ring {
-    animation: none !important;
-  }
+/* Keeps a typed space visible in a `whitespace-pre` context (SYNTAX mode phrases). */
+.keep-space {
+  white-space: pre;
 }
