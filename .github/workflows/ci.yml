@@ -165,7 +165,20 @@ jobs:
             fi
           done
           echo "$headers" | grep -qi 'x-content-type-options: nosniff'
-          # An SPA host must also serve the app itself, not just the health probe.
-          curl -fsS http://127.0.0.1:8080/ | grep -q 'KEYRUSH'
-          echo "Security headers and the document both answer."
+          # An SPA host must also serve the app itself, not just the health probe. Note the
+          # `grep -q … <<<"$var"` shape: `curl | grep -q` under `pipefail` is a false failure —
+          # grep exits at the first match, curl then dies on SIGPIPE (141) and the pipeline
+          # reports an error for a page that is perfectly fine.
+          body=$(curl -fsS http://127.0.0.1:8080/)
+          if ! grep -q "KEYRUSH" <<<"$body"; then
+            echo "::error::GET / did not return the app document (no KEYRUSH in the body)"
+            docker stop keyrush-ci >/dev/null
+            exit 1
+          fi
+          if [ "$(wc -c <<<"$body")" -lt 50000 ]; then
+            echo "::error::the served document is only $(wc -c <<<"$body") bytes — the inlined bundle is missing"
+            docker stop keyrush-ci >/dev/null
+            exit 1
+          fi
+          echo "Security headers, the document and the inlined payload all answer."
           docker stop keyrush-ci >/dev/null
