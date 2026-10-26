@@ -416,7 +416,7 @@ Closed by:
 | `base: "./"` — the artifact is location-independent | `vite.config.ts` |
 | `./favicon.svg`, `./manifest.webmanifest` | `index.html` |
 | `"start_url": "./"`, `"scope": "./"`, `icons[].src: "favicon.svg"` | `public/manifest.webmanifest` |
-| Pages pipeline: `npm run verify` → `upload-pages-artifact` → `deploy-pages`, and an idempotent step that switches `build_type` to `workflow` so branch-mode Jekyll can never publish raw source again | `.github/workflows/deploy-pages.yml` |
+| Pages pipeline: `npm run verify` → `upload-pages-artifact` → `deploy-pages`, preceded by a pre-flight that refuses to deploy while Pages is still in branch mode and names the exact setting to change (a workflow may not change it — `403 Resource not accessible by integration` — so it checks rather than fixes) | `.github/workflows/deploy-pages.yml` |
 | CI guard: fail if the artifact has a root-absolute URL or any `/src/main` reference | `.github/workflows/ci.yml` (build job) |
 | Deploy + subpath rules documented | `README.md` §Deploy |
 
