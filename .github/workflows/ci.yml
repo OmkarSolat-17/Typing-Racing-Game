@@ -118,7 +118,18 @@ jobs:
       # The image builds the app itself (multi-stage, `nginx -t` included), so this job
       # exercises exactly what ships rather than a CI-only approximation of it.
       - name: Build the image
-        run: docker build -t keyrush:ci .
+        # The build log is echoed into an annotation as well as the job transcript: a
+        # red image build is otherwise only diagnosable by reading 400 lines of Dockerfile
+        # layers, and a one-line annotation is what shows up on the commit checks.
+        run: |
+          set -euo pipefail
+          if ! docker build -t keyrush:ci . >/tmp/docker-build.log 2>&1; then
+            tail -n 30 /tmp/docker-build.log
+            first=$(grep -m1 -E '^ERROR|error:|\[emerg\]|failed to' /tmp/docker-build.log | tr -d '\r' | cut -c1-200 || true)
+            echo "::error::docker build failed: ${first:-see job log}"
+            exit 1
+          fi
+          tail -n 3 /tmp/docker-build.log
 
       # One container, one session: `nginx -t` at build time already proves the config
       # parses, so a failure here is about behaviour — and the log dump (which a trap-on-EXIT
