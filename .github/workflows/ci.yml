@@ -144,7 +144,8 @@ jobs:
           set -euo pipefail
           diag() {
             state=$(docker inspect -f '{{.State.Status}} exit={{.State.ExitCode}} err={{.State.Error}}' keyrush-ci 2>/dev/null || echo "no container")
-            log=$(docker logs keyrush-ci 2>&1 | tail -n 6 | tr '\n\r' '  ' | cut -c1-260 || true)
+            log=$( { docker logs keyrush-ci 2>&1 | grep -aiE "emerg|crit|denied|unknown directive|invalid|address already" | tail -n 3; } | tr '\n\r' '  ' | cut -c1-300)
+            [ -n "$log" ] || log=$(docker logs keyrush-ci 2>&1 | tail -n 3 | tr '\n\r' '  ' | cut -c1-300)
             echo "::error::$1 | ${state} | nginx: ${log}"
             docker rm -f keyrush-ci >/dev/null 2>&1 || true
             exit 1
